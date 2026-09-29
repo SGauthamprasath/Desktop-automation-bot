@@ -1,0 +1,34 @@
+/* The window itself is transparent; every layer on top must be too. */
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+}
+
+.sprite {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* Nearest-neighbour scaling: keep pixel art crisp on high-DPI screens. */
+  image-rendering: pixelated;
+}
+
+.bot {
+  width: 100%;
+  height: 100%;
+}
+
+/* Set while the cursor is over an opaque pixel of the bot. */
+body.over-bot {
+  cursor: grab;
+}
+
+.bot.dragging,
+.bot.dragging * {
+  cursor: grabbing;
+}

@@ -1,0 +1,144 @@
+/* Colours picked from the sprite: dark navy outline, light body, bright blue. */
+:root {
+  --ink: #16213e;
+  --paper: #ffffff;
+  --accent: #2f8fdd;
+  --muted: #5b6b8c;
+  --tail: 10px;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+  font: 13px/1.4 'Segoe UI', system-ui, sans-serif;
+  color: var(--ink);
+}
+
+/* The window is sized to this element, so its padding is the only
+   transparent area: room for the tail and the hard drop shadow. */
+.bubble-root {
+  padding: 3px 5px 5px 3px;
+}
+.bubble-root.above {
+  padding-bottom: calc(var(--tail) + 5px);
+}
+.bubble-root.below {
+  padding-top: calc(var(--tail) + 3px);
+}
+
+.bubble {
+  position: relative;
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 8px;
+  box-shadow: 3px 3px 0 rgba(22, 33, 62, 0.25);
+  padding: 10px 12px;
+}
+
+/* Tail: an outlined triangle made of two stacked CSS triangles. Its x
+   position comes from main (--tail-x) so it always points at the bot. */
+.bubble::before,
+.bubble::after {
+  content: '';
+  position: absolute;
+  left: calc(var(--tail-x) - 3px - 10px); /* 3px = root's left padding */
+  border: 10px solid transparent;
+}
+.above .bubble::before {
+  top: 100%;
+  border-top-color: var(--ink);
+}
+.above .bubble::after {
+  top: calc(100% - 3px);
+  border-top-color: var(--paper);
+}
+.below .bubble::before {
+  bottom: 100%;
+  border-bottom-color: var(--ink);
+}
+.below .bubble::after {
+  bottom: calc(100% - 3px);
+  border-bottom-color: var(--paper);
+}
+
+.message {
+  margin: 0 18px 0 0; /* keep clear of the close button */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.close {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.close:hover {
+  color: var(--ink);
+}
+
+/* Choice buttons for a question: stacked, full width, easy to hit. */
+.choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+.choices button {
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+  color: var(--ink);
+  background: var(--paper);
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.choices button:hover,
+.choices button:focus-visible {
+  background: var(--accent);
+  color: var(--paper);
+  outline: none;
+}
+
+.input-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.input-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--ink);
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  padding: 3px 6px;
+  outline: none;
+}
+.input-row input:focus {
+  border-color: var(--accent);
+}
+.input-row button {
+  font: inherit;
+  font-weight: 600;
+  color: var(--paper);
+  background: var(--accent);
+  border: 2px solid var(--ink);
+  border-radius: 4px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.input-row button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

@@ -1,0 +1,28 @@
+{
+  "image": "bot_spritesheet.png",
+  "frameWidth": 128,
+  "frameHeight": 128,
+  "columns": 6,
+  "states": {
+    "idle": {
+      "row": 0,
+      "frames": 6
+    },
+    "walk": {
+      "row": 1,
+      "frames": 6
+    },
+    "thinking": {
+      "row": 2,
+      "frames": 6
+    },
+    "alert": {
+      "row": 3,
+      "frames": 4
+    },
+    "talking": {
+      "row": 4,
+      "frames": 4
+    }
+  }
+}
