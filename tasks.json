@@ -1,0 +1,30 @@
+[
+  {
+    "id": "notepad_set_value",
+    "instruction": "Type 'Hello from my agent' into the document.",
+    "app_title_regex": ".*Notepad",
+    "expected_action_type": "set_value",
+    "notes": "Covers set_value. Already confirmed passing."
+  },
+  {
+    "id": "notepad_invoke_menu",
+    "instruction": "Open the Edit menu (just open it, don't click anything inside).",
+    "app_title_regex": ".*Notepad",
+    "expected_action_type": "invoke",
+    "notes": "Covers invoke, with no destructive side effect."
+  },
+  {
+    "id": "notepad_toggle_wordwrap",
+    "instruction": "Enable Word Wrap from the Format menu.",
+    "app_title_regex": ".*Notepad",
+    "expected_action_type": "toggle",
+    "notes": "Covers toggle. NOT idempotent - re-running flips it back off. Check current state before each run."
+  },
+  {
+    "id": "explorer_select_item",
+    "instruction": "Select the 'final-year' folder in the file list (don't open it).",
+    "app_title_regex": ".*File Explorer",
+    "expected_action_type": "invoke",
+    "notes": "Covers selection_item/invoke on a non-Notepad app - checks pattern handling generalizes across apps."
+  }
+]

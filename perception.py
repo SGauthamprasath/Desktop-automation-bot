@@ -41,9 +41,70 @@ def connect_to_app(title_regex: str):
     Connects to a specific running application by its window title
     (regex match). Use this when you want to target a named app
     (e.g. "Notepad") rather than whatever's currently focused.
+
+    Uses Desktop(...).window(title_re=...) rather than
+    Application.connect().top_window(). The latter connects by PROCESS
+    then returns that process's highest-Z-order window - fine for
+    single-window apps like Notepad, but wrong for explorer.exe, which
+    owns File Explorer windows, the taskbar, AND the system tray flyout
+    all in one process. Matching the window directly by title avoids
+    that ambiguity entirely.
     """
-    app = Application(backend="uia").connect(title_re=title_regex)
-    return app.top_window()
+    if not title_regex.startswith(".*"):
+        title_regex = ".*" + title_regex
+    window = Desktop(backend="uia").window(title_re=title_regex)
+    window.wait("exists", timeout=10)
+    return window
+
+
+def detect_popup(main_window):
+    """
+    Modern Windows apps often render an open menu or dropdown as a
+    SEPARATE top-level window owned by the same process, not as a
+    descendant of the main window. window.children() alone never sees
+    these - confirmed in testing: invoking a menu header appeared to
+    "succeed" repeatedly with no new elements ever showing up, because
+    the flyout was open but invisible to perception the whole time.
+
+    Looks for another top-level Desktop window belonging to the same
+    process as main_window, with a control_type that looks like a
+    popup. Returns None if nothing found (the normal case - no menu
+    currently open).
+    """
+    try:
+        main_handle = main_window.element_info.handle
+        main_pid = main_window.element_info.process_id
+    except Exception:
+        return None
+
+    # Persistent shell windows that happen to share a process with common
+    # target apps (explorer.exe owns File Explorer windows AND the
+    # taskbar) - these are never the popup we're looking for, and without
+    # this exclusion the taskbar was being matched on every single step,
+    # confirmed in testing (it has nothing to do with whatever menu/
+    # dropdown was actually open).
+    EXCLUDED_TITLES = {"Taskbar", "Program Manager"}
+    POPUP_TYPES = {"Menu", "List", "Pane", "Window"}
+
+    try:
+        candidates = Desktop(backend="uia").windows()
+    except Exception:
+        return None
+
+    for w in candidates:
+        try:
+            info = w.element_info
+            if info.handle == main_handle:
+                continue
+            if info.process_id != main_pid:
+                continue
+            if w.window_text() in EXCLUDED_TITLES:
+                continue
+            if info.control_type in POPUP_TYPES:
+                return w
+        except Exception:
+            continue
+    return None
 
 
 def _supported_patterns(element):
@@ -113,17 +174,47 @@ def extract_element_tree(window, max_depth: int = 6, _path=None, _depth=0):
     return elements
 
 
-def get_screen_state(window=None):
+def get_screen_state(window=None, popup=None):
     """
     Convenience entry point: returns the full structured tree for the
     given window (or the foreground window if none given), ready to be
     serialized into the LLM prompt.
+
+    popup: pass a window object from detect_popup() to merge its
+    elements in too (e.g. an open menu's items). If omitted, this
+    auto-detects a popup itself - fine for standalone/manual use, but
+    agent.py's loop should detect once per step and pass it explicitly
+    so execute_action() later uses the SAME popup reference, not a
+    freshly re-detected one that might differ by the time it runs.
+
+    Popup elements get paths starting at index len(window.children()) -
+    i.e. treated as if they were one more top-level child after the
+    main window's real children. executor.py's _locate_by_path knows
+    to redirect any path starting at that index to the popup window
+    instead of the main one.
     """
     if window is None:
         window = get_foreground_app()
+
+    main_elements = extract_element_tree(window)
+    all_elements = list(main_elements)
+    popup_title = None
+
+    if popup is None:
+        popup = detect_popup(window)
+    if popup is not None:
+        try:
+            popup_root_index = len(window.children())
+            popup_elements = extract_element_tree(popup, _path=[popup_root_index])
+            all_elements.extend(popup_elements)
+            popup_title = popup.window_text()
+        except Exception:
+            pass
+
     return {
         "window_title": window.window_text(),
-        "elements": extract_element_tree(window),
+        "elements": all_elements,
+        "popup_detected": popup_title,  # None, or the open popup's title - visible signal for debugging too
     }
 
 
