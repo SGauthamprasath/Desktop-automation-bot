@@ -16,69 +16,81 @@ import config
 # The example response below deliberately uses an element unlike the real
 # tasks: an earlier example naming the "Edit" menu made the 7B model pick
 # Edit regardless of the task (2/2 in a replay test; a neutral example fixed it).
-SYSTEM_PROMPT = """You are a desktop automation agent. You are given:
-1. A task instruction from the user.
-2. The current window's UI as a list of elements (from Windows UI Automation), each with a "path" you must use to reference it, plus the titles of other open windows.
+SYSTEM_PROMPT = """You are a desktop automation agent. Each step you get the user's task, the
+current window's numbered ELEMENTS (from Windows UI Automation), other text on
+screen, the open windows, and the actions taken so far.
 
-Decide the SINGLE next action to take. Respond with ONLY a JSON object, no other text, in this exact shape:
+Decide the SINGLE next action. Respond with ONLY this JSON object:
+{"reasoning": "<one short sentence>", "action_type": "<action>", "element": <number or null>, "target_name": "<that element's name>", "value": "<text>", "plan_step": <number or null>}
 
-{
-  "reasoning": "<one short sentence: what the screen shows and what moves the task forward>",
-  "action_type": "<one of the actions below>",
-  "path": [<indices>],
-  "target_name": "<the exact "name" of the element at that path>",
-  "value": "<text>"
-}
+Write "reasoning" FIRST: what the screen shows and what moves the task forward.
 
-Write "reasoning" FIRST - decide what to do before you pick the action.
+ELEMENT ACTIONS - give the element's number in "element" and its name in
+"target_name". Each element lists the actions it supports after "can:".
+  invoke       click a button, menu item or link
+  toggle       flip a checkbox, switch or checkable menu item
+  select       select a list item, tab, file or radio button (without opening it)
+  expand       open a menu, dropdown or tree node
+  collapse     close a menu, dropdown or tree node
+  set_value    put "value" into a text field (replaces its content) - use this
+               whenever the text belongs in a listed field
+  scroll       scroll that area; "value" = up, down, left or right
+TOOL ACTIONS - "element": null; the argument goes in "value":
+  open_app      launch an app by name; it becomes the current window
+  switch_window make another open window current; "value" = part of its title
+  press_keys    keyboard shortcut, e.g. "ctrl+s" or "enter"
+  type_text     type "value" at the keyboard cursor - only when no listed text
+                field fits (e.g. keyboard input to an app with no text box)
+  wait          wait "value" seconds (at most 10)
+done - the task is complete.
 
-ELEMENT ACTIONS - act on one element of current_screen. "path" and
-"target_name" must describe the SAME listed element:
-  invoke         click a button, menu item or link
-  toggle         flip a checkbox, switch or checkable menu item
-  select         select a list item, tab, file or radio button (without opening it)
-  expand         open a menu, dropdown or tree node
-  collapse       close a menu, dropdown or tree node
-  set_value      put "value" into a listed text field (replaces its content) -
-                 use this whenever the text belongs in a field that is listed
-  scroll         scroll the element's area; "value" = up, down, left or right
-  click_fallback real mouse click - ONLY if no other action can do it
+Rules:
+- No current window, or the wrong app? Use open_app or switch_window first.
+- Only choose an action listed in that element's "can:".
+- An element marked "expanded" is already open: act on its items, never invoke
+  it again (that closes it). Don't toggle or select something already in the
+  state the task asks for.
+- Read "ACTIONS SO FAR" and the screen changes: if the task is already
+  complete, respond with "done". Never repeat an action that already succeeded.
+- If a PLAN is given, work on the step marked "in progress" until it is
+  finished, then the next one; put the number of the step this action is for
+  in "plan_step". Stop with "done" as soon as DONE WHEN is true. Without a
+  plan, "plan_step" is null.
 
-TOOL ACTIONS - no path needed; the argument goes in "value":
-  open_app       launch an app by name, e.g. "Calculator"; it becomes the current window
-  switch_window  make another open window current; "value" = part of its title from "open_windows"
-  press_keys     keyboard shortcut in the current window, e.g. "ctrl+s" or "enter"
-  type_text      type "value" at the keyboard cursor - only when no listed text
-                 field fits (e.g. keyboard input to an app with no text box)
-  wait           wait "value" seconds (at most 10) for something to load
-
-done             the task is complete - no path or value needed
-
-If there is no current window, or it is the wrong app, use open_app or
-switch_window first. Prefer element actions; use press_keys / type_text when
-no element does the job.
-
-Elements may report their state: "toggled" (true = on), "expanded"
-(true = open), "selected" (true = selected). Use these: don't re-invoke a
-menu that is already expanded (that closes it) - act on its items instead;
-don't toggle or select something that is already in the state the task asks for.
-
-Check "actions_taken_so_far" before deciding: if you already successfully
-performed the action the task needs, respond with action_type "done" instead
-of repeating it.
-
-Respond with ONLY that single JSON object - one object, the keys shown above,
-nothing else. NEVER return a list of actions, NEVER wrap it in an "actions" key,
-NEVER echo back the input. Decide ONE action only, even if several elements look
-relevant - you will be asked again next step.
-
-Example of a correct response, given a screen with a button named "Apply" at path [1, 2]:
-{"reasoning": "The settings are filled in, so Apply saves them", "action_type": "invoke", "path": [1, 2], "target_name": "Apply", "value": ""}
-
-Respond with ONLY the JSON object. No markdown fences, no commentary before or after it.
+Example, for a screen with [7] Button "Apply" | can: invoke:
+{"reasoning": "The settings are filled in, so Apply saves them", "action_type": "invoke", "element": 7, "target_name": "Apply", "value": ""}
 """
 
-REQUIRED_KEYS = {"action_type", "path", "target_name", "value", "reasoning"}
+PLANNER_PROMPT = """You plan desktop automation tasks on Windows. Given a task and what is on
+screen, write a short plan: the steps needed to do EXACTLY what the task asks -
+nothing more - and how to tell that the task is finished.
+
+Respond with ONLY this JSON object:
+{"steps": ["<step 1>", "<step 2>"], "done_when": "<what the screen shows when the task is complete>"}
+
+Rules:
+- 1 to 8 steps. Each step is a sub-goal like "Open the View menu" or
+  "Calculate 15 + 27" - not single keystrokes or digits.
+- Cover EVERY part of the task, and make "done_when" check every part.
+- Do not add steps the task does not ask for. If the task is to open a menu,
+  the plan ends once the menu is open - do not click anything inside it.
+- If the needed app is not the current window, the first step opens or
+  switches to it.
+
+Example, task "Turn on dark mode in the app's settings":
+{"steps": ["Open the Settings page", "Turn on the Dark mode switch"], "done_when": "The Dark mode switch is on"}
+"""
+
+MAX_PLAN_STEPS = 8  # 5 was too few: a 6-step plan got rejected and the retry silently dropped a step
+PLAN_CONTEXT_ELEMENTS = 30  # element names shown to the planner - enough to be concrete
+
+REQUIRED_KEYS = {"reasoning", "action_type", "element", "target_name", "value"}
+
+# How each UIA pattern is shown to the model: as the action(s) it enables.
+ACTIONS_FOR_PATTERN = {
+    "invoke": ["invoke"], "toggle": ["toggle"], "selection_item": ["select"],
+    "expand_collapse": ["expand", "collapse"], "value": ["set_value"], "scroll": ["scroll"],
+}
 
 ELEMENT_ACTIONS = {"invoke", "toggle", "select", "expand", "collapse", "set_value", "scroll", "click_fallback"}
 TOOL_ACTIONS = {"open_app", "switch_window", "press_keys", "type_text", "wait"}  # mirrors tools.TOOL_ACTIONS
@@ -100,7 +112,19 @@ class ActionSchemaError(ValueError):
     check misses, since json.loads() succeeds on these."""
 
 
-def _validate_action(parsed) -> dict:
+def _element_number(value):
+    """The model's "element" as an int: accepts 7, "7", "[7]"; None otherwise."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.search(r"\d+", str(value))
+    return int(match.group()) if match else None
+
+
+def _validate_action(parsed, shown_elements: list) -> dict:
+    """Checks the schema and resolves the model's element number to the
+    element's internal UIA path, which is what the executor uses."""
     if not isinstance(parsed, dict):
         raise ActionSchemaError(f"expected a JSON object, got {type(parsed).__name__}")
     if "action_type" not in parsed:
@@ -109,10 +133,16 @@ def _validate_action(parsed) -> dict:
     if action_type not in VALID_ACTION_TYPES:
         raise ActionSchemaError(f"action_type '{action_type}' is not one of {sorted(VALID_ACTION_TYPES)}")
     if action_type in ELEMENT_ACTIONS:
-        # target_name alone is enough - grounding can find the path by name.
-        if "path" not in parsed and not parsed.get("target_name"):
-            raise ActionSchemaError(f"'{action_type}' acts on an element: give its 'path' and 'target_name'")
-        parsed.setdefault("path", [])
+        number = _element_number(parsed.get("element"))
+        by_id = {e["id"]: e for e in shown_elements}
+        if number in by_id:
+            parsed["path"] = by_id[number]["path"]
+        elif str(parsed.get("target_name") or "").strip():
+            parsed["path"] = []  # unknown number, but a name - grounding finds it by name
+        elif number is None:
+            raise ActionSchemaError(f"'{action_type}' acts on an element: give its number in 'element'")
+        else:
+            raise ActionSchemaError(f"there is no element [{number}] - use a number from the ELEMENTS list")
     if action_type in TOOL_ACTIONS - {"wait"} and not str(parsed.get("value") or "").strip():
         # Seen in testing: {"action_type": "open_app", "target_name": "Calculator", "value": ""}.
         # The intent is unambiguous, so accept target_name as the argument.
@@ -159,7 +189,7 @@ def _check_action(action: dict, shown_elements: list, history: list) -> dict:
     if needed and action_type != "scroll" and needed not in element["patterns"]:
         # e.g. "select" on the list container instead of on the item in it.
         raise ActionSchemaError(
-            f"{element['name']!r} does not support '{action_type}' (it supports {element['patterns']}). "
+            f"{element['name']!r} does not support '{action_type}' (it can: {', '.join(_actions_for(element))}). "
             f"Pick the element that does - for select, the item itself rather than the list around it")
 
     if action_type in ("invoke", "expand") and element.get("expanded") is True:
@@ -217,16 +247,15 @@ def _match_click_pattern(action: dict, shown_elements: list) -> dict:
 
 
 def _ground_path(action: dict, shown_elements: list) -> dict:
-    path = action["path"]
     by_path = {tuple(e["path"]): e for e in shown_elements}
-    at_path = by_path.get(tuple(path))
+    chosen = by_path.get(tuple(action["path"]))
     target = str(action.get("target_name") or "").strip().lower()
 
     if not target:
-        if at_path is None:
-            raise ActionSchemaError(f"path {path} is not one of the elements in current_screen")
+        if chosen is None:
+            raise ActionSchemaError("that element is not in the ELEMENTS list")
         return action
-    if at_path is not None and at_path["name"].strip().lower() == target:
+    if chosen is not None and chosen["name"].strip().lower() == target:
         return action
 
     matches = [e for e in shown_elements if e["name"].strip().lower() == target]
@@ -234,15 +263,19 @@ def _ground_path(action: dict, shown_elements: list) -> dict:
     if len(matches) > 1 and needed:
         matches = [e for e in matches if needed in e["patterns"]] or matches
     if len(matches) == 1:
-        found = at_path["name"] if at_path else "no listed element"
-        print(f"  [info] path {path} is {found!r}, not {action['target_name']!r} - "
-              f"using {matches[0]['path']} instead")
+        found = f"[{chosen['id']}] {chosen['name']!r}" if chosen else "not a listed element"
+        print(f"  [info] element {action.get('element')!r} is {found}, not {action['target_name']!r} - "
+              f"using [{matches[0]['id']}] instead")
         return {**action, "path": matches[0]["path"]}
 
     if not matches:
-        raise ActionSchemaError(f"no element in current_screen is named {action['target_name']!r}")
+        # Seen in testing: toggling a menu item closes the menu, the model then
+        # asks for the next item in it three times and gives up.
+        raise ActionSchemaError(
+            f"no element in the ELEMENTS list is named {action['target_name']!r} - it is not on screen right now. "
+            "Items inside a menu or dropdown only appear while it is open: if it closed, expand it again first")
     raise ActionSchemaError(f"several elements are named {action['target_name']!r} - "
-                            f"pick one by its exact path")
+                            f"give the number of the one you mean")
 
 
 def _task_relevance(element: dict, task_words: set) -> int:
@@ -263,22 +296,42 @@ def _words(text: str) -> set:
 # Patterns executor.py can actually act on.
 EXECUTABLE_PATTERNS = set(PATTERN_FOR_ACTION.values())
 
-# Only these fields help the model choose an action. bounding_box, auto_id
-# and visible roughly doubled the prompt size in testing without being used.
-PROMPT_FIELDS = ("path", "control_type", "name", "patterns")
+# Only these fields are kept per element. bounding_box, auto_id and visible
+# roughly doubled the prompt size in testing without being used. "path" is
+# kept for mapping the model's element number back to the UI - it is never
+# shown to the model.
+KEPT_FIELDS = ("path", "control_type", "name", "patterns")
+
+WINDOW_CHROME_TYPES = {"Window", "TitleBar"}
+
+MAX_ELEMENTS = 50     # numbered, actionable elements
+MAX_TEXTS = 25        # unnumbered "other text on screen"
+MAX_NAME_CHARS = 80
 
 
 def _slim(element: dict) -> dict:
-    slim = {k: element[k] for k in PROMPT_FIELDS}
+    slim = {k: element[k] for k in KEPT_FIELDS}
     for key in ("toggled", "expanded", "selected"):  # see perception._pattern_state
         if key in element:
             slim[key] = element[key]
     if not element.get("enabled", True):
-        slim["enabled"] = False  # only worth the tokens when it's unusual
+        slim["enabled"] = False
     return slim
 
 
-def _compact_elements(screen_state: dict, task: str = "", max_elements: int = 60) -> dict:
+def _actions_for(element: dict) -> list:
+    actions = []
+    for pattern in element["patterns"]:
+        actions += [a for a in ACTIONS_FOR_PATTERN.get(pattern, []) if a not in actions]
+    return actions
+
+
+def _clean(text: str) -> str:
+    text = " ".join(str(text).split())  # newlines/tabs -> single spaces
+    return text if len(text) <= MAX_NAME_CHARS else text[:MAX_NAME_CHARS - 1] + "…"
+
+
+def _compact_elements(screen_state: dict, task: str = "") -> dict:
     """
     Trims the element list sent to the LLM (perception.py's own saved
     snapshot is untouched - this only affects what goes in the prompt).
@@ -291,9 +344,12 @@ def _compact_elements(screen_state: dict, task: str = "", max_elements: int = 60
        schema - fewer, more relevant elements means a shorter, more
        focused prompt.
 
-    Keeps elements that are either actionable (have a pattern the executor
-    can use) or meaningfully named - drops decorative/empty elements first,
-    then caps the total count.
+    Actionable elements (a pattern the executor can use) are numbered
+    1..N - the model refers to them by that number, which small models get
+    right far more often than copying nested UIA paths like [1, 1, 1, 6, 4]
+    (a constant source of wrong-element errors in testing). Named elements
+    with nothing to act on (labels, status text such as "Display is 19")
+    are kept as unnumbered "texts", so the model can still read them.
     """
     # Window-chrome controls (Close/Minimize/etc.) should never be offered
     # as options at all - a real near-miss in testing had the model
@@ -303,6 +359,11 @@ def _compact_elements(screen_state: dict, task: str = "", max_elements: int = 60
     from executor import is_dangerous
 
     elements = [e for e in screen_state["elements"] if not is_dangerous(e["name"])]
+
+    # The window/title bar objects themselves expose a Value pattern (their
+    # title), which showed up as `[1] Window "Calculator" | can: set_value` -
+    # never a real target, and an invitation to overwrite the window title.
+    elements = [e for e in elements if e["control_type"] not in WINDOW_CHROME_TYPES]
 
     def executable(e):
         return bool(EXECUTABLE_PATTERNS & set(e["patterns"]))
@@ -330,34 +391,162 @@ def _compact_elements(screen_state: dict, task: str = "", max_elements: int = 60
                   if not executable(e) and e["name"].strip() and not redundant_label(e)]
     actionable.sort(key=lambda e: _task_relevance(e, task_words), reverse=True)
 
-    kept = [_slim(e) for e in (actionable + named_only)[:max_elements]]
+    elements = [{**_slim(e), "id": i} for i, e in enumerate(actionable[:MAX_ELEMENTS], start=1)]
+    texts = []
+    for e in named_only:
+        text = _clean(e["name"])
+        if text not in texts:
+            texts.append(text)
     return {
         "window_title": screen_state["window_title"],  # None = no current window yet
-        "elements": kept,
+        "elements": elements,
+        "texts": texts[:MAX_TEXTS],
         "open_windows": screen_state.get("open_windows", []),
     }
 
 
-def _build_user_message(task, compact_screen, history):
-    payload = json.dumps({
-        "task": task,
-        "current_screen": compact_screen,
-        "actions_taken_so_far": history,
-    }, separators=(",", ":"))  # no padding spaces - every token counts on a local model
-    # The reminder is repeated here, AFTER the data, not just once in the
-    # system prompt. Smaller models weight text near the end of the
-    # context more heavily - and the screen's element objects (each with
-    # their own "path" key) are otherwise the most recent, most prominent
-    # JSON shape the model has seen, which is what it was latching onto.
-    reminder = (
-        "\n\nFirst check actions_taken_so_far: if they already completed the task, "
-        "respond with action_type \"done\". "
-        "Otherwise respond with exactly ONE JSON object describing the next "
-        "ACTION to take - keys: reasoning, action_type, path, target_name, value. "
-        "Do NOT return a screen element. Do NOT return a list. Do NOT plan "
-        "multiple steps ahead. One action object, nothing else."
-    )
-    return payload + reminder
+def _render_element(e: dict) -> str:
+    line = f'[{e["id"]}] {e["control_type"]} "{_clean(e["name"])}" | can: {", ".join(_actions_for(e))}'
+    state = []
+    if "toggled" in e:
+        state.append("on" if e["toggled"] else "off")
+    if "expanded" in e:
+        state.append("expanded" if e["expanded"] else "collapsed")
+    if e.get("selected"):
+        state.append("selected")
+    if e.get("enabled") is False:
+        state.append("disabled")
+    return line + (f" | {', '.join(state)}" if state else "")
+
+
+def _render_history(history: list) -> str:
+    """Past actions as short lines that refer to elements by NAME - element
+    numbers are re-assigned every step, so old numbers would mislead."""
+    if not history:
+        return "(none yet)"
+    lines = []
+    for i, h in enumerate(history, start=1):
+        a = h["action"]
+        action_type, value = a["action_type"], str(a.get("value") or "")
+        if action_type in ELEMENT_ACTIONS:
+            line = f'{i}. {action_type} "{_clean(a.get("target_name") or "")}"'
+            if value and action_type in ("set_value", "scroll"):
+                line += f' value="{_clean(value)}"'
+        else:
+            line = f'{i}. {action_type} "{_clean(value)}"'
+        if isinstance(a.get("plan_step"), int):
+            line += f" [plan step {a['plan_step']}]"
+        line += " -> OK" if h["result"] else " -> FAILED"
+        if h.get("note"):
+            line += f" ({h['note']})"
+        changes = h.get("screen_changes") or {}
+        described = []
+        if "window" in changes:
+            described.append(f"window is now {changes['window']!r}")
+        if changes.get("appeared"):
+            described.append("appeared: " + ", ".join(f'"{_clean(t)}"' for t in changes["appeared"]))
+        if changes.get("gone"):
+            described.append("gone: " + ", ".join(f'"{_clean(t)}"' for t in changes["gone"]))
+        if changes.get("note"):
+            described.append(changes["note"])
+        if described:
+            line += " | screen: " + "; ".join(described)
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _plan_progress(history: list) -> int:
+    """Highest plan step a successful action has worked on (0 = not started).
+    Steps before it count as done - in testing, the model without this lost
+    its place, e.g. switching back to Notepad before calculating anything."""
+    steps = [h["action"].get("plan_step") for h in history if h["result"]]
+    return max([s for s in steps if isinstance(s, int)], default=0)
+
+
+def _render_plan(plan, history: list) -> list:
+    if not plan:
+        return []
+    current = max(_plan_progress(history), 1)
+    lines = ["PLAN (a guide - follow it unless the screen shows it is wrong):"]
+    for i, step in enumerate(plan["steps"], start=1):
+        marker = " (done)" if i < current else " (in progress)" if i == current else ""
+        lines.append(f"{i}. {step}{marker}")
+    lines.append(f"DONE WHEN: {plan['done_when']}")
+    return lines + [""]
+
+
+def _build_user_message(task, compact_screen, history, plan=None):
+    # Plain text rather than JSON: about half the size for the same content,
+    # and the model no longer sees element-shaped JSON objects it can mistake
+    # for the shape of its own answer.
+    title = compact_screen["window_title"]
+    parts = [
+        f"TASK: {task}",
+        "",
+        *_render_plan(plan, history),
+        f"CURRENT WINDOW: {title!r}" if title else "CURRENT WINDOW: (none - use open_app or switch_window)",
+        "OPEN WINDOWS: " + (" | ".join(_clean(t) for t in compact_screen["open_windows"]) or "(none)"),
+        "ELEMENTS:",
+        "\n".join(_render_element(e) for e in compact_screen["elements"]) or "(none)",
+        "OTHER TEXT ON SCREEN: " + (" | ".join(f'"{t}"' for t in compact_screen["texts"]) or "(none)"),
+        "ACTIONS SO FAR:",
+        _render_history(history),
+        "",
+        # Repeated AFTER the data: smaller models weight the end of the
+        # context most heavily.
+        ("First check ACTIONS SO FAR against DONE WHEN: if the task is already complete, respond with \"done\". "
+         if plan else
+         "First check ACTIONS SO FAR: if the task is already complete, respond with \"done\". ")
+        + "Otherwise respond with ONE JSON object: reasoning, action_type, element, target_name, value.",
+    ]
+    return "\n".join(parts)
+
+
+def _validate_plan(parsed) -> dict:
+    if not isinstance(parsed, dict):
+        raise ActionSchemaError(f"expected a JSON object, got {type(parsed).__name__}")
+    steps = parsed.get("steps")
+    if not isinstance(steps, list) or not steps or not all(isinstance(s, str) and s.strip() for s in steps):
+        raise ActionSchemaError("'steps' must be a non-empty list of short instructions")
+    if len(steps) > MAX_PLAN_STEPS:
+        raise ActionSchemaError(f"use at most {MAX_PLAN_STEPS} steps")
+    done_when = str(parsed.get("done_when") or "").strip()
+    if not done_when:
+        raise ActionSchemaError("'done_when' must say what the screen shows when the task is complete")
+    return {"steps": [_clean(s) for s in steps], "done_when": _clean(done_when)}
+
+
+def make_plan(task: str, screen_state: dict):
+    """
+    One model call before acting: a short plan plus a "done when" condition,
+    which the actor then sees at every step. Aimed at the failures that
+    one-step-at-a-time decisions kept producing in testing - typing numbers
+    in the wrong order, an extra Enter after "=", clicking an item after the
+    menu the task asked for was already open, scrolling on for 10 steps.
+
+    Returns {"steps": [...], "done_when": "..."}, or None if the model can't
+    produce a valid plan - the agent then simply runs without one.
+    """
+    compact = _compact_elements(screen_state, task=task)
+    title = compact["window_title"]
+    names = [f'{e["control_type"]} "{_clean(e["name"])}"' for e in compact["elements"][:PLAN_CONTEXT_ELEMENTS] if e["name"].strip()]
+    user_message = "\n".join([
+        f"TASK: {task}",
+        f"CURRENT WINDOW: {title!r}" if title else "CURRENT WINDOW: (none)",
+        "OPEN WINDOWS: " + (" | ".join(_clean(t) for t in compact["open_windows"]) or "(none)"),
+        "SOME ELEMENTS ON SCREEN: " + ("; ".join(names) or "(none)"),
+    ])
+    messages = [{"role": "system", "content": PLANNER_PROMPT}, {"role": "user", "content": user_message}]
+    call = _call_local if config.BACKEND == "local" else _call_cloud
+    for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
+        raw = call(messages, 0 if attempt == 0 else 0.4)
+        try:
+            return _validate_plan(json.loads(_strip_fences(raw)))
+        except (json.JSONDecodeError, ActionSchemaError) as e:
+            print(f"  [warn] planner returned an invalid plan (attempt {attempt + 1}): {e}")
+            messages += [{"role": "assistant", "content": raw},
+                         {"role": "user", "content": f"That plan was invalid: {e}. Try again with the exact JSON shape."}]
+    return None
 
 
 def _strip_fences(text: str) -> str:
@@ -417,7 +606,7 @@ def _call_cloud(messages: list, temperature: float) -> str:
     return response.content[0].text
 
 
-def get_action(task: str, screen_state: dict, history: list) -> dict:
+def get_action(task: str, screen_state: dict, history: list, plan=None) -> dict:
     """
     Returns a parsed action dict.
 
@@ -433,7 +622,7 @@ def get_action(task: str, screen_state: dict, history: list) -> dict:
          reproduce the exact same failure
     """
     compact_screen = _compact_elements(screen_state, task=task)
-    user_message = _build_user_message(task, compact_screen, history)
+    user_message = _build_user_message(task, compact_screen, history, plan)
     call = _call_local if config.BACKEND == "local" else _call_cloud
 
     messages = [
@@ -449,9 +638,18 @@ def get_action(task: str, screen_state: dict, history: list) -> dict:
         cleaned = _strip_fences(raw)
         try:
             parsed = json.loads(cleaned)
-            action = _validate_action(parsed)  # catches valid-JSON-wrong-shape too
-            action = _ground_action(action, compact_screen["elements"])
-            return _check_action(action, compact_screen["elements"], history)
+            shown = compact_screen["elements"]
+            action = _validate_action(parsed, shown)  # catches valid-JSON-wrong-shape too
+            action = _ground_action(action, shown)
+            action = _check_action(action, shown, history)
+            step = _element_number(action.get("plan_step"))
+            action["plan_step"] = step if plan and step and 1 <= step <= len(plan["steps"]) else None
+            # Record the element's real name, so the history (which refers to
+            # elements by name) is accurate even if the model gave only a number.
+            target = next((e for e in shown if e["path"] == action.get("path")), None)
+            if target is not None:
+                action["target_name"] = target["name"]
+            return action
         except (json.JSONDecodeError, ActionSchemaError) as e:
             last_error = e
             kind = "invalid JSON" if isinstance(e, json.JSONDecodeError) else "wrong schema"
@@ -463,10 +661,9 @@ def get_action(task: str, screen_state: dict, history: list) -> dict:
             messages.append({"role": "assistant", "content": raw})
             messages.append({"role": "user", "content": (
                 f"That response was invalid: {e}. "
-                "You must respond with exactly one JSON object with keys "
-                "reasoning, action_type, path, target_name, value - describing ONE "
-                "action. Do not return a screen element, do not return a "
-                "list. Try again."
+                "Respond with exactly one JSON object with keys "
+                "reasoning, action_type, element, target_name, value - describing ONE "
+                "action. Try again."
             )})
 
     raise ValueError(f"LLM returned invalid/malformed action after retries: {last_error}")

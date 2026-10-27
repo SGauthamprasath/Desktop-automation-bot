@@ -30,6 +30,10 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 MAX_RETRIES_ON_BAD_JSON = 2
 
+# Before acting, ask the model for a short plan (steps + "done when") that the
+# actor then sees every step. "0" turns it off - useful for comparing.
+USE_PLANNER = os.getenv("USE_PLANNER", "1") == "1"
+
 # WinUI 3 apps (e.g. Windows 11 Notepad) only render a menu/dropdown flyout
 # while the app is the foreground window - invoked in the background, the
 # element reports "expanded" but no items ever appear in the UIA tree. When

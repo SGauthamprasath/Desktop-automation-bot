@@ -22,7 +22,7 @@ import config
 import tools
 from perception import get_screen_state, connect_to_app, detect_popup
 from executor import execute_action, ExecutionResult
-from llm_client import get_action
+from llm_client import get_action, make_plan
 
 MAX_STEPS = 15
 MAX_CHANGES_LISTED = 6  # per direction - enough to describe a step, small enough for the prompt
@@ -94,6 +94,7 @@ def run_task(task: str, app_title_regex: str = None):
 
     history = []
     previous_state = None
+    plan = None
     for step in range(MAX_STEPS):
         if window is not None and not _alive(window):
             print("  [info] the current window has closed")
@@ -106,21 +107,28 @@ def run_task(task: str, app_title_regex: str = None):
             history[-1]["screen_changes"] = _screen_changes(previous_state, state)
         previous_state = state
 
+        if step == 0 and config.USE_PLANNER:
+            plan = make_plan(task, state)
+            if plan:
+                print("[plan] " + " -> ".join(plan["steps"]) + f"  | done when: {plan['done_when']}")
+            else:
+                print("[plan] no valid plan - continuing without one")
+
         try:
-            action = get_action(task, state, history)
+            action = get_action(task, state, history, plan)
         except ValueError as e:
             # Local model failed to produce a valid action even after retries -
             # a real data point for the report, not a bug to hide. Phase 2's
             # gate is the natural place to handle this more gracefully later.
             print(f"\nStopping: {e}")
-            return _outcome(False, step, history, window)
+            return _outcome(False, step, history, window, plan)
 
         print(f"\n[Step {step + 1}] {action.get('reasoning', '')}")
         print(f"  -> {action}")
 
         if action["action_type"] == "done":
             print("\nTask marked complete by agent.")
-            return _outcome(True, step + 1, history, window)
+            return _outcome(True, step + 1, history, window, plan)
 
         if action["action_type"] in tools.TOOL_ACTIONS:
             result, new_window = tools.run_tool(action, window)
@@ -141,18 +149,19 @@ def run_task(task: str, app_title_regex: str = None):
             # Phase 1 has no recovery yet - just log and stop.
             # Phase 3 replaces this with detection + retry/rollback.
             print(f"\nAction failed, stopping (Phase 3 will handle recovery): {result.error}")
-            return _outcome(False, step + 1, history, window)
+            return _outcome(False, step + 1, history, window, plan)
 
     print("\nMax steps reached without completion.")
-    return _outcome(False, MAX_STEPS, history, window)
+    return _outcome(False, MAX_STEPS, history, window, plan)
 
 
-def _outcome(success, steps, history, window):
+def _outcome(success, steps, history, window, plan=None):
     try:
         final_window = window.window_text() if _alive(window) else None
     except Exception:
         final_window = None
-    return {"success": success, "steps": steps, "history": history, "final_window": final_window}
+    return {"success": success, "steps": steps, "history": history,
+            "final_window": final_window, "plan": plan}
 
 
 if __name__ == "__main__":

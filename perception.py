@@ -60,7 +60,12 @@ def connect_to_app(title_regex: str):
     # windows), take the front-most instead of raising ElementAmbiguousError.
     window = Desktop(backend="uia").window(title_re=title_regex, found_index=0)
     window.wait("exists", timeout=10)
-    return window
+    # Then pin it by HANDLE. A title-based spec "loses" the window as soon as
+    # its title changes - Notepad switching tabs, Explorer changing folder -
+    # which in testing made the agent think the window had closed and go
+    # off opening a second Notepad. The handle stays the same for the
+    # window's whole life.
+    return Desktop(backend="uia").window(handle=window.wrapper_object().handle)
 
 
 def detect_popup(main_window):
