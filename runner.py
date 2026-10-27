@@ -40,18 +40,18 @@ def run_all(tasks, only_id=None):
         print(f"\n{'=' * 60}")
         print(f"TASK: {task['id']}  ({task.get('notes', '')})")
         print(f"  instruction: {task['instruction']}")
-        print(f"  app: {task['app_title_regex']}")
+        print(f"  app: {task.get('app_title_regex') or '(none - agent opens/switches itself)'}")
         print("=" * 60)
 
         row = {
             "task_id": task["id"],
-            "app": task["app_title_regex"],
+            "app": task.get("app_title_regex", ""),
             "expected_action_type": task.get("expected_action_type", ""),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
 
         try:
-            outcome = run_task(task["instruction"], task["app_title_regex"])
+            outcome = run_task(task["instruction"], task.get("app_title_regex"))
             row["success"] = outcome["success"]
             row["steps"] = outcome["steps"]
             row["error"] = ""
@@ -59,11 +59,13 @@ def run_all(tasks, only_id=None):
             # task exercised the pattern you intended, not just "it finished".
             used_types = [h["action"]["action_type"] for h in outcome["history"]]
             row["action_types_used"] = ",".join(used_types)
+            row["final_window"] = outcome.get("final_window") or ""
         except Exception as e:
             row["success"] = False
             row["steps"] = -1
             row["error"] = str(e)
             row["action_types_used"] = ""
+            row["final_window"] = ""
             print(f"\n[CRASH] {task['id']}: {e}")
             traceback.print_exc()
 
@@ -76,7 +78,7 @@ def save_results(results):
     os.makedirs(RESULTS_DIR, exist_ok=True)
     path = os.path.join(RESULTS_DIR, f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
     fieldnames = ["task_id", "app", "expected_action_type", "action_types_used",
-                  "success", "steps", "error", "timestamp"]
+                  "success", "steps", "final_window", "error", "timestamp"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

@@ -17,11 +17,23 @@ load_dotenv()
 BACKEND = os.getenv("AGENT_BACKEND", "local")
 
 # --- local backend settings ---
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5:7b-instruct")
+# Ollama's default context window (~2048 tokens) is smaller than a typical
+# prompt here, and Ollama silently drops the START of the prompt when it
+# overflows - i.e. the system prompt and the task. Always set it explicitly.
+LOCAL_NUM_CTX = int(os.getenv("LOCAL_NUM_CTX", "8192"))
 
 # --- cloud backend settings ---
 CLOUD_MODEL = os.getenv("CLOUD_MODEL", "claude-sonnet-4-6")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 MAX_RETRIES_ON_BAD_JSON = 2
+
+# WinUI 3 apps (e.g. Windows 11 Notepad) only render a menu/dropdown flyout
+# while the app is the foreground window - invoked in the background, the
+# element reports "expanded" but no items ever appear in the UIA tree. When
+# True, the executor focuses the target window before invoking anything that
+# supports ExpandCollapse. This trades away the no-focus-steal property for
+# those actions only; set to "0" to keep the agent strictly in the background.
+FOCUS_BEFORE_EXPAND = os.getenv("FOCUS_BEFORE_EXPAND", "1") == "1"

@@ -17,13 +17,17 @@ gate yet, so anything it connects to should be safe to touch.
 
 from pywinauto import Desktop
 from pywinauto.application import Application
+import ctypes
 import json
 import os
 from datetime import datetime
 
 # Patterns we care about for action execution later (Phase 1 executor.py
 # maps directly onto these).
-INTERESTING_PATTERNS = ["invoke", "toggle", "value", "expand_collapse", "selection_item"]
+INTERESTING_PATTERNS = ["invoke", "toggle", "value", "expand_collapse", "selection_item", "scroll"]
+
+GW_OWNER = 4
+POPUP_CLASSES = {"#32768"}  # classic Win32 menus and context menus
 
 
 def get_foreground_app():
@@ -52,7 +56,9 @@ def connect_to_app(title_regex: str):
     """
     if not title_regex.startswith(".*"):
         title_regex = ".*" + title_regex
-    window = Desktop(backend="uia").window(title_re=title_regex)
+    # found_index=0: if several windows match (two Calculators, two Explorer
+    # windows), take the front-most instead of raising ElementAmbiguousError.
+    window = Desktop(backend="uia").window(title_re=title_regex, found_index=0)
     window.wait("exists", timeout=10)
     return window
 
@@ -100,7 +106,13 @@ def detect_popup(main_window):
                 continue
             if w.window_text() in EXCLUDED_TITLES:
                 continue
-            if info.control_type in POPUP_TYPES:
+            # Same process is NOT enough: every Store/UWP app window
+            # (Calculator, Settings, ...) lives in ApplicationFrameHost, so a
+            # second Calculator was being merged in as this one's "popup" -
+            # confirmed in testing. A real popup is owned by the main window
+            # (dialogs, flyouts) or is a classic Win32 menu window.
+            owned = ctypes.windll.user32.GetWindow(info.handle, GW_OWNER) == main_handle
+            if info.control_type in POPUP_TYPES and (owned or info.class_name in POPUP_CLASSES):
                 return w
         except Exception:
             continue
@@ -121,6 +133,41 @@ def _supported_patterns(element):
             # Not all elements expose every pattern - that's expected, skip it.
             continue
     return supported
+
+
+def _pattern_state(element, patterns):
+    """
+    Current state of stateful patterns, so the model can tell a menu that's
+    already open from a closed one, or a setting that's already on from an
+    off one. Without this, testing showed the model re-invoking an open
+    menu (which closes it) in a loop, and it had no way to know whether an
+    "enable X" task was already satisfied.
+
+    Only included when the element supports the pattern; values are plain
+    booleans. Indeterminate/partial/leaf states are left out rather than
+    guessed.
+    """
+    state = {}
+    if "toggle" in patterns:
+        try:
+            value = element.iface_toggle.CurrentToggleState  # 0 off, 1 on, 2 indeterminate
+            if value in (0, 1):
+                state["toggled"] = bool(value)
+        except Exception:
+            pass
+    if "expand_collapse" in patterns:
+        try:
+            value = element.iface_expand_collapse.CurrentExpandCollapseState  # 0 collapsed, 1 expanded, 2 partial, 3 leaf
+            if value in (0, 1):
+                state["expanded"] = bool(value)
+        except Exception:
+            pass
+    if "selection_item" in patterns:
+        try:
+            state["selected"] = bool(element.iface_selection_item.CurrentIsSelected)
+        except Exception:
+            pass
+    return state
 
 
 def extract_element_tree(window, max_depth: int = 6, _path=None, _depth=0):
@@ -162,6 +209,7 @@ def extract_element_tree(window, max_depth: int = 6, _path=None, _depth=0):
                 },
                 "patterns": _supported_patterns(child),
             }
+            entry.update(_pattern_state(child, entry["patterns"]))
             elements.append(entry)
         except Exception:
             # Some elements throw on property access (e.g. mid-render) -

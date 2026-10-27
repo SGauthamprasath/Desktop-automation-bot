@@ -15,10 +15,30 @@
   },
   {
     "id": "notepad_toggle_wordwrap",
-    "instruction": "Enable Word Wrap from the Format menu.",
+    "instruction": "Enable Word Wrap from the View menu.",
     "app_title_regex": ".*Notepad",
     "expected_action_type": "toggle",
     "notes": "Covers toggle. NOT idempotent - re-running flips it back off. Check current state before each run."
+  },
+  {
+    "id": "calc_open_and_add",
+    "instruction": "Open Calculator and calculate 12 + 7.",
+    "expected_action_type": "open_app",
+    "notes": "Tool layer: starts with no window, so the agent must open_app first. Expected display: 19."
+  },
+  {
+    "id": "calc_press_escape",
+    "instruction": "Clear the Calculator display using the Escape key.",
+    "app_title_regex": "^Calculator$",
+    "expected_action_type": "press_keys",
+    "notes": "Tool layer: keyboard shortcut. Make sure the display is not already 0 before running."
+  },
+  {
+    "id": "calc_type_expression",
+    "instruction": "Use the keyboard to calculate 25*4 in Calculator.",
+    "app_title_regex": "^Calculator$",
+    "expected_action_type": "type_text",
+    "notes": "Tool layer: typing into an app with no text box. Expected display: 100 (an extra Enter repeats the operation)."
   },
   {
     "id": "explorer_select_item",
