@@ -22,7 +22,9 @@ LOCAL_MODEL = os.getenv("LOCAL_MODEL", "qwen2.5:7b-instruct")
 # Ollama's default context window (~2048 tokens) is smaller than a typical
 # prompt here, and Ollama silently drops the START of the prompt when it
 # overflows - i.e. the system prompt and the task. Always set it explicitly.
-LOCAL_NUM_CTX = int(os.getenv("LOCAL_NUM_CTX", "8192"))
+# 6144 fits the compact prompts with room to spare and uses less memory than
+# 8192 (benchmark runs were being killed for low memory).
+LOCAL_NUM_CTX = int(os.getenv("LOCAL_NUM_CTX", "6144"))
 
 # --- cloud backend settings ---
 CLOUD_MODEL = os.getenv("CLOUD_MODEL", "claude-sonnet-4-6")

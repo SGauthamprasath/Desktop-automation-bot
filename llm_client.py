@@ -9,6 +9,7 @@ in later - it wraps a call to get_action(), regardless of backend.
 
 import json
 import re
+import urllib.error
 import urllib.request
 
 import config
@@ -32,15 +33,22 @@ ELEMENT ACTIONS - give the element's number in "element" and its name in
   select       select a list item, tab, file or radio button (without opening it)
   expand       open a menu, dropdown or tree node
   collapse     close a menu, dropdown or tree node
-  set_value    put "value" into a text field (replaces its content) - use this
-               whenever the text belongs in a listed field
+  set_value    make a text field contain exactly "value" - it replaces ALL of
+               its content in one step, so never select or delete text first.
+               "" empties the field; "\\n" starts a new line. Use this whenever
+               the text belongs in a listed field. "contains:" shows what the
+               field holds now.
   scroll       scroll that area; "value" = up, down, left or right
 TOOL ACTIONS - "element": null; the argument goes in "value":
   open_app      launch an app by name; it becomes the current window
   switch_window make another open window current; "value" = part of its title
   press_keys    keyboard shortcut, e.g. "ctrl+s" or "enter"
   type_text     type "value" at the keyboard cursor - only when no listed text
-                field fits (e.g. keyboard input to an app with no text box)
+                field fits. To enter a number, expression or several characters
+                in an app with on-screen keys, type it ALL in one type_text
+                (keyboard symbols: + - * / = .) instead of one invoke per key.
+                Named keys (Escape, Enter, Tab, Delete) are press_keys, not
+                type_text - type_text "Escape" types the letters E-s-c-a-p-e.
   wait          wait "value" seconds (at most 10)
 done - the task is complete.
 
@@ -76,6 +84,11 @@ Rules:
   the plan ends once the menu is open - do not click anything inside it.
 - If the needed app is not the current window, the first step opens or
   switches to it.
+- Entering a number or calculation is ONE step with every character in the
+  task's order, e.g. "Type 9*4=" - never one step per button or digit.
+- Writing, replacing or deleting a text field's content is ONE step that
+  sets everything in it (e.g. "Set the document text to 'a\\nb'", "Set the
+  document text to empty") - no select-all, delete or Enter steps.
 
 Example, task "Turn on dark mode in the app's settings":
 {"steps": ["Open the Settings page", "Turn on the Dark mode switch"], "done_when": "The Dark mode switch is on"}
@@ -158,6 +171,12 @@ def _validate_action(parsed, shown_elements: list) -> dict:
 # NOT exempt: the model once answered "no action is needed" and then chose
 # wait 14 times in a row instead of done.
 REPEATABLE_ACTIONS = {"scroll"}
+# Actions that set a state, so A-B-A-B means undoing and redoing. Not invoke:
+# Calculator's 1 + 1 + 1 is One, Plus, One, Plus.
+# Key names the model wrongly sends as type_text. Only ones nobody types as
+# text - not "Home", "End" or "Up", which can be real words.
+KEY_NAMES_NOT_TEXT = {"enter", "return", "escape", "esc", "tab", "backspace"}
+STATE_SETTING_ACTIONS = {"set_value", "toggle", "select", "expand", "collapse", "switch_window"}
 
 
 def _check_action(action: dict, shown_elements: list, history: list, window_title=None) -> dict:
@@ -176,11 +195,23 @@ def _check_action(action: dict, shown_elements: list, history: list, window_titl
             raise ActionSchemaError(
                 f"the current window {window_title!r} already is that app - act in it instead of opening it again")
 
+    def same_as(past):
+        return all(str(past.get(k)) == str(action.get(k)) for k in ("action_type", "path", "value"))
+
+    if action_type in STATE_SETTING_ACTIONS and len(history) >= 3 and same_as(history[-2]["action"]) and all(
+            str(history[-1]["action"].get(k)) == str(history[-3]["action"].get(k))
+            for k in ("action_type", "path", "value")):
+        # Seen in testing: set_value "A" (meant as select-all), then "", then
+        # "A" again ... for 12 steps - each step differs from the one before,
+        # so the plain repeat check below never fired.
+        raise ActionSchemaError(
+            "you are going back and forth between the same two actions. Check the screen: "
+            "if the task is complete, respond with action_type \"done\"; otherwise try something different")
+
     if history:
         last = history[-1]
         from executor import NOTHING_MOVED
-        same = all(str(last["action"].get(k)) == str(action.get(k))
-                   for k in ("action_type", "path", "value"))
+        same = same_as(last["action"])
         had_no_effect = str(last.get("note", "")).startswith(NOTHING_MOVED)
         if same and last["result"] and (action_type not in REPEATABLE_ACTIONS or had_no_effect):
             # e.g. pressing Enter five times after a calculation, or typing
@@ -188,6 +219,13 @@ def _check_action(action: dict, shown_elements: list, history: list, window_titl
             raise ActionSchemaError(
                 "you already did exactly this action in the previous step and it succeeded. "
                 "If the task is now complete, respond with action_type \"done\"; otherwise choose a different action")
+
+    if action_type == "type_text" and _name_key(action.get("value")).strip("{}<>[] ") in KEY_NAMES_NOT_TEXT:
+        # Seen in testing despite the prompt: type_text "Enter" / "Escape",
+        # which types the letters, not the key.
+        raise ActionSchemaError(
+            f"type_text types letters - {action['value']!r} would type the word. "
+            f"For the key itself use press_keys with that key")
 
     if action_type not in ELEMENT_ACTIONS:
         return action
@@ -256,19 +294,26 @@ def _match_click_pattern(action: dict, shown_elements: list) -> dict:
     return action
 
 
+def _name_key(name) -> str:
+    """Names compared the way they were shown: _clean turns " into '."""
+    return " ".join(str(name or "").replace('"', "'").split()).lower()
+
+
 def _ground_path(action: dict, shown_elements: list) -> dict:
     by_path = {tuple(e["path"]): e for e in shown_elements}
     chosen = by_path.get(tuple(action["path"]))
-    target = str(action.get("target_name") or "").strip().lower()
+    target = _name_key(action.get("target_name"))
 
     if not target:
         if chosen is None:
             raise ActionSchemaError("that element is not in the ELEMENTS list")
         return action
-    if chosen is not None and chosen["name"].strip().lower() == target:
+    if chosen is not None and target in (_name_key(chosen["name"]), _name_key(chosen["control_type"])):
+        # The type counts too: with [2] Document "Text editor" the model
+        # wrote target_name "Document" - the number already says which one.
         return action
 
-    matches = [e for e in shown_elements if e["name"].strip().lower() == target]
+    matches = [e for e in shown_elements if _name_key(e["name"]) == target]
     needed = PATTERN_FOR_ACTION.get(action["action_type"])
     if len(matches) > 1 and needed:
         matches = [e for e in matches if needed in e["patterns"]] or matches
@@ -317,11 +362,12 @@ WINDOW_CHROME_TYPES = {"Window", "TitleBar"}
 MAX_ELEMENTS = 50     # numbered, actionable elements
 MAX_TEXTS = 25        # unnumbered "other text on screen"
 MAX_NAME_CHARS = 80
+MAX_VALUE_CHARS = 80  # text field content preview
 
 
 def _slim(element: dict) -> dict:
     slim = {k: element[k] for k in KEPT_FIELDS}
-    for key in ("toggled", "expanded", "selected"):  # see perception._pattern_state
+    for key in ("toggled", "expanded", "selected", "value"):  # see perception._pattern_state
         if key in element:
             slim[key] = element[key]
     if not element.get("enabled", True):
@@ -338,6 +384,10 @@ def _actions_for(element: dict) -> list:
 
 def _clean(text: str) -> str:
     text = " ".join(str(text).split())  # newlines/tabs -> single spaces
+    # Double quotes inside a name (Explorer's 'Up to "bench_files"') got copied
+    # into the model's JSON unescaped, ending the string early; in JSON mode
+    # the model then looped on whitespace until Ollama aborted the request.
+    text = text.replace('"', "'")
     return text if len(text) <= MAX_NAME_CHARS else text[:MAX_NAME_CHARS - 1] + "…"
 
 
@@ -426,7 +476,20 @@ def _render_element(e: dict) -> str:
         state.append("selected")
     if e.get("enabled") is False:
         state.append("disabled")
+    if "value" in e:
+        state.append(f"contains: {_preview(e['value'])}")
     return line + (f" | {', '.join(state)}" if state else "")
+
+
+def _preview(text: str) -> str:
+    """A text field's content on one line: line breaks shown as \\n (so the
+    model can count lines), long text cut, empty shown as ""."""
+    text = str(text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
+    if not text.strip():
+        return "(empty)"  # a bare "" didn't read as empty: the model kept "clearing" it
+    if len(text) > MAX_VALUE_CHARS:
+        text = text[:MAX_VALUE_CHARS - 1] + "…"
+    return json.dumps(text, ensure_ascii=False).replace("\\\\n", "\\n")
 
 
 def _render_history(history: list) -> str:
@@ -549,8 +612,9 @@ def make_plan(task: str, screen_state: dict):
     messages = [{"role": "system", "content": PLANNER_PROMPT}, {"role": "user", "content": user_message}]
     call = _call_local if config.BACKEND == "local" else _call_cloud
     for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
-        raw = call(messages, 0 if attempt == 0 else 0.4)
+        raw = ""
         try:
+            raw = call(messages, 0 if attempt == 0 else 0.4)
             return _validate_plan(json.loads(_strip_fences(raw)))
         except (json.JSONDecodeError, ActionSchemaError) as e:
             print(f"  [warn] planner returned an invalid plan (attempt {attempt + 1}): {e}")
@@ -586,8 +650,16 @@ def _call_local(messages: list, temperature: float) -> str:
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        result = json.load(response)
+    try:
+        with urllib.request.urlopen(request, timeout=300) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")
+        if "repeat limit" in detail:
+            # Ollama aborts a response stuck repeating one token (HTTP 500).
+            # Raised as a bad answer so the caller retries, warmer.
+            raise ActionSchemaError("the response got stuck repeating itself - answer with short, plain JSON") from e
+        raise urllib.error.HTTPError(e.url, e.code, f"{e.reason}: {detail[:200]}", e.headers, None) from e
 
     # Truncation is silent on Ollama's side, so surface it here.
     prompt_tokens = result.get("prompt_eval_count") or 0
@@ -644,10 +716,10 @@ def get_action(task: str, screen_state: dict, history: list, plan=None) -> dict:
     temperatures = [0, 0.4, 0.7]
     for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
         temp = temperatures[min(attempt, len(temperatures) - 1)]
-        raw = call(messages, temp)
-        cleaned = _strip_fences(raw)
+        raw = ""
         try:
-            parsed = json.loads(cleaned)
+            raw = call(messages, temp)
+            parsed = json.loads(_strip_fences(raw))
             shown = compact_screen["elements"]
             action = _validate_action(parsed, shown)  # catches valid-JSON-wrong-shape too
             action = _ground_action(action, shown)

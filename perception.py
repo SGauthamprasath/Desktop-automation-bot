@@ -25,6 +25,7 @@ from datetime import datetime
 # Patterns we care about for action execution later (Phase 1 executor.py
 # maps directly onto these).
 INTERESTING_PATTERNS = ["invoke", "toggle", "value", "expand_collapse", "selection_item", "scroll"]
+VALUE_PREVIEW_CHARS = 200  # the prompt shows less; this just bounds what's read
 
 GW_OWNER = 4
 POPUP_CLASSES = {"#32768"}  # classic Win32 menus and context menus
@@ -170,6 +171,15 @@ def _pattern_state(element, patterns):
     if "selection_item" in patterns:
         try:
             state["selected"] = bool(element.iface_selection_item.CurrentIsSelected)
+        except Exception:
+            pass
+    if "value" in patterns:
+        # A text field's content, so the model can see whether its edit landed
+        # (without it, a successful set_value was overwritten a step later).
+        # Password fields are skipped; long text is cut to a short preview.
+        try:
+            if not element.element_info.element.CurrentIsPassword:
+                state["value"] = str(element.iface_value.CurrentValue or "")[:VALUE_PREVIEW_CHARS]
         except Exception:
             pass
     return state

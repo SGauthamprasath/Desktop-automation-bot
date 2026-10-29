@@ -26,7 +26,10 @@ import config
 # repeatedly clicked Close/Minimize/Maximize on Notepad's title bar
 # while confused. This is a blunt, temporary safety net standing in for
 # Phase 2's real cost/reversibility gate, which doesn't exist yet.
-DANGEROUS_NAMES = {"close", "minimize", "minimise", "maximize", "maximise", "restore"}
+# "exit"/"quit" were missing: asked to "Close Notepad", the agent used
+# File > Exit instead, and Notepad (holding the user's tabs) really closed.
+DANGEROUS_NAMES = {"close", "exit", "quit", "minimize", "minimise", "maximize", "maximise", "restore"}
+DANGEROUS_PHRASES = {"sign out", "log off", "log out", "shut down"}
 
 
 def is_dangerous(name: str) -> bool:
@@ -37,7 +40,7 @@ def is_dangerous(name: str) -> bool:
     mention the word, like "Auto close brackets", are not.
     """
     words = re.findall(r"[a-z]+", (name or "").lower())
-    return bool(words) and words[0] in DANGEROUS_NAMES
+    return bool(words) and (words[0] in DANGEROUS_NAMES or " ".join(words[:2]) in DANGEROUS_PHRASES)
 
 
 FLYOUT_SETTLE_SECONDS = 0.4
@@ -333,11 +336,14 @@ def _perform(window, element, action: dict) -> ExecutionResult:
             return ExecutionResult(True, "uia_pattern")
 
         elif action_type == "set_value":
-            if _replace_text_via_edit_messages(element, action.get("value", "")):
+            # None (a JSON null) would reach EM_REPLACESEL as a null pointer;
+            # edit controls want "\r\n" line breaks, the model writes "\n".
+            text = _normalize_text(action.get("value")).replace("\n", "\r\n")
+            if _replace_text_via_edit_messages(element, text):
                 return ExecutionResult(True, "win32_edit_message")
             if hasattr(element, "set_edit_text"):
                 # Classic Win32 Edit control - pywinauto's convenience method works.
-                element.set_edit_text(action.get("value", ""))
+                element.set_edit_text(text)
             else:
                 # Not classified as EditWrapper (common with modern WinUI/UWP
                 # apps, e.g. Windows 11's redesigned Notepad) - fall back to
@@ -345,7 +351,7 @@ def _perform(window, element, action: dict) -> ExecutionResult:
                 # same pattern perception.py's _supported_patterns already
                 # checks for, so execution stays consistent with what
                 # perception detected.
-                element.iface_value.SetValue(action.get("value", ""))
+                element.iface_value.SetValue(text)
             return ExecutionResult(True, "uia_pattern")
 
         elif action_type == "toggle":

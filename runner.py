@@ -29,6 +29,7 @@ import argparse
 import csv
 import json
 import os
+import sys
 import traceback
 from datetime import datetime
 
@@ -142,6 +143,10 @@ def print_summary(results):
 
 
 if __name__ == "__main__":
+    # The Windows console/pipe default (cp1252) can't print names like "√"
+    # (Calculator's square root button) - a print crashed a whole task.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="+", help="Run only these task ids")
     parser.add_argument("--category", help="Run only tasks with this category")

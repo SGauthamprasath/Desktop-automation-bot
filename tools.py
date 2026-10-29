@@ -60,7 +60,8 @@ TERMINAL_WINDOW_CLASSES = {"CASCADIA_HOSTING_WINDOW_CLASS", "ConsoleWindowClass"
 
 # Normalized combos (modifiers in a fixed order) that close things or open a
 # command runner / lock screen.
-BLOCKED_KEY_COMBOS = {"alt+f4", "ctrl+w", "ctrl+f4", "win+r", "win+x", "win+l"}
+# ctrl+q / ctrl+shift+w quit or close the whole window in many apps.
+BLOCKED_KEY_COMBOS = {"alt+f4", "ctrl+w", "ctrl+f4", "ctrl+q", "ctrl+shift+w", "win+r", "win+x", "win+l"}
 
 # Shell windows that are always present and never a meaningful target.
 IGNORED_WINDOW_TITLES = {"Taskbar", "Program Manager"}
