@@ -95,6 +95,7 @@ def run_task(task: str, app_title_regex: str = None):
     history = []
     previous_state = None
     plan = None
+    touched = set()  # handles of windows the agent acted in - the runner's cleanup looks there
     for step in range(MAX_STEPS):
         if window is not None and not _alive(window):
             print("  [info] the current window has closed")
@@ -121,14 +122,14 @@ def run_task(task: str, app_title_regex: str = None):
             # a real data point for the report, not a bug to hide. Phase 2's
             # gate is the natural place to handle this more gracefully later.
             print(f"\nStopping: {e}")
-            return _outcome(False, step, history, window, plan)
+            return _outcome(False, step, history, window, plan, touched)
 
         print(f"\n[Step {step + 1}] {action.get('reasoning', '')}")
         print(f"  -> {action}")
 
         if action["action_type"] == "done":
             print("\nTask marked complete by agent.")
-            return _outcome(True, step + 1, history, window, plan)
+            return _outcome(True, step + 1, history, window, plan, touched)
 
         if action["action_type"] in tools.TOOL_ACTIONS:
             result, new_window = tools.run_tool(action, window)
@@ -139,6 +140,11 @@ def run_task(task: str, app_title_regex: str = None):
         else:
             result = execute_action(window, action, popup_window=popup)
         print(f"  -> {result}")
+        if window is not None:
+            try:
+                touched.add(window.element_info.handle)
+            except Exception:
+                pass
 
         entry = {"action": action, "result": result.success}
         if result.detail:
@@ -149,19 +155,19 @@ def run_task(task: str, app_title_regex: str = None):
             # Phase 1 has no recovery yet - just log and stop.
             # Phase 3 replaces this with detection + retry/rollback.
             print(f"\nAction failed, stopping (Phase 3 will handle recovery): {result.error}")
-            return _outcome(False, step + 1, history, window, plan)
+            return _outcome(False, step + 1, history, window, plan, touched)
 
     print("\nMax steps reached without completion.")
-    return _outcome(False, MAX_STEPS, history, window, plan)
+    return _outcome(False, MAX_STEPS, history, window, plan, touched)
 
 
-def _outcome(success, steps, history, window, plan=None):
+def _outcome(success, steps, history, window, plan=None, touched=()):
     try:
         final_window = window.window_text() if _alive(window) else None
     except Exception:
         final_window = None
     return {"success": success, "steps": steps, "history": history,
-            "final_window": final_window, "plan": plan}
+            "final_window": final_window, "plan": plan, "touched_windows": sorted(touched)}
 
 
 if __name__ == "__main__":

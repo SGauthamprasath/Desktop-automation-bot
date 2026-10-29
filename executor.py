@@ -178,6 +178,53 @@ class ExecutionResult:
         return f"<ExecutionResult {status} via {self.method_used}{note}>"
 
 
+def _normalize_text(text) -> str:
+    # RichEdit reports line breaks as "\r", edit controls as "\r\n".
+    return str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _state_before(element, action_type: str):
+    """What the per-action check needs to know before acting."""
+    if action_type == "toggle":
+        try:
+            return element.iface_toggle.CurrentToggleState
+        except Exception:
+            return None
+    return None
+
+
+def _postcondition_problem(element, action: dict, before):
+    """
+    Reads the element back after a successful action and returns a short
+    description of what didn't change as expected, or None if it did (or
+    if it can't be told - e.g. the element vanished because toggling a menu
+    item closed its menu). invoke, scroll and the click fallback have no
+    generic expected state; their effect shows up in the screen changes.
+    """
+    action_type = action["action_type"]
+    try:
+        if action_type == "set_value":
+            wanted = _normalize_text(action.get("value", ""))
+            actual = _normalize_text(element.iface_value.CurrentValue)
+            if actual != wanted:
+                return f"the field now contains {actual[:60]!r}, not {wanted[:60]!r}"
+        elif action_type == "toggle" and before is not None:
+            if element.iface_toggle.CurrentToggleState == before:
+                return "the toggle state did not change"
+        elif action_type == "select":
+            if not element.iface_selection_item.CurrentIsSelected:
+                return "the element is not selected"
+        elif action_type in ("expand", "collapse"):
+            state = element.iface_expand_collapse.CurrentExpandCollapseState  # 0 collapsed, 1 expanded
+            if action_type == "expand" and state == 0:
+                return "it is still collapsed"
+            if action_type == "collapse" and state == 1:
+                return "it is still expanded"
+    except Exception:
+        return None  # can't read it back any more - not evidence of failure
+    return None
+
+
 def _locate_by_path(window, path, popup_window=None):
     """
     Re-locates the exact element a given perception snapshot pointed to.
@@ -256,6 +303,19 @@ def execute_action(window, action: dict, popup_window=None) -> ExecutionResult:
                       f"(perception may have mis-detected this, or the wrong element was targeted)"
             )
 
+    before = _state_before(element, action_type)
+    result = _perform(window, element, action)
+    if result.success:
+        problem = _postcondition_problem(element, action, before)
+        if problem:
+            # e.g. the Phase 1 Notepad bug: SetValue "succeeded" but the
+            # text never stuck. Report it as the failure it is.
+            return ExecutionResult(False, result.method_used, error=f"the action ran but {problem}")
+    return result
+
+
+def _perform(window, element, action: dict) -> ExecutionResult:
+    action_type = action["action_type"]
     try:
         if action_type == "invoke":
             # Opens a flyout (menu, dropdown, split button)? See
@@ -297,7 +357,15 @@ def execute_action(window, action: dict, popup_window=None) -> ExecutionResult:
                 # Notepad's "Word wrap") expose the Toggle pattern but no
                 # .toggle() convenience method - call the UIA interface.
                 element.iface_toggle.Toggle()
-            return ExecutionResult(True, "uia_pattern")
+            # Read the new state straight away and put it in the history:
+            # toggling a menu item closes its menu, so the model can no
+            # longer SEE the result. In testing it turned Word wrap on, then
+            # believed it was still off and went looking in Settings.
+            try:
+                state = "on" if element.iface_toggle.CurrentToggleState == 1 else "off"
+                return ExecutionResult(True, "uia_pattern", detail=f"{element.element_info.name!r} is now {state}")
+            except Exception:
+                return ExecutionResult(True, "uia_pattern")
 
         elif action_type == "select":
             # SelectionItem: list items, tabs, files, radio buttons. Selects

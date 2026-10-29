@@ -154,17 +154,27 @@ def _validate_action(parsed, shown_elements: list) -> dict:
 
 
 # Actions whose effect is the same when repeated are the ones worth
-# re-checking; repeating scroll or wait is normal ("scroll down further").
-REPEATABLE_ACTIONS = {"scroll", "wait"}
+# re-checking; repeating scroll is normal ("scroll down further"). wait is
+# NOT exempt: the model once answered "no action is needed" and then chose
+# wait 14 times in a row instead of done.
+REPEATABLE_ACTIONS = {"scroll"}
 
 
-def _check_action(action: dict, shown_elements: list, history: list) -> dict:
+def _check_action(action: dict, shown_elements: list, history: list, window_title=None) -> dict:
     """
     Deterministic sanity checks on an already-grounded action, each one
     added after a failure mode seen in testing. A rejection goes back to the
     model through get_action's retry loop with the reason spelled out.
     """
     action_type = action["action_type"]
+
+    if action_type == "open_app" and window_title:
+        # Seen in testing: open_app "Notepad" while already in Notepad opened
+        # a second Notepad window, and the task was done in the wrong one.
+        app_words = _words(str(action.get("value") or ""))
+        if app_words and app_words <= _words(window_title):
+            raise ActionSchemaError(
+                f"the current window {window_title!r} already is that app - act in it instead of opening it again")
 
     if history:
         last = history[-1]
@@ -641,7 +651,7 @@ def get_action(task: str, screen_state: dict, history: list, plan=None) -> dict:
             shown = compact_screen["elements"]
             action = _validate_action(parsed, shown)  # catches valid-JSON-wrong-shape too
             action = _ground_action(action, shown)
-            action = _check_action(action, shown, history)
+            action = _check_action(action, shown, history, compact_screen["window_title"])
             step = _element_number(action.get("plan_step"))
             action["plan_step"] = step if plan and step and 1 <= step <= len(plan["steps"]) else None
             # Record the element's real name, so the history (which refers to

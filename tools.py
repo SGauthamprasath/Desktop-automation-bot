@@ -26,7 +26,6 @@ input is refused if the target didn't actually come to the front, and a few
 key combinations that close windows or open a command runner are blocked.
 """
 
-import difflib
 import json
 import re
 import subprocess
@@ -46,8 +45,14 @@ NEW_WINDOW_GRACE_SECONDS = 3
 APP_SETTLE_SECONDS = 1.0  # let a fresh window populate its UI tree
 MAX_WAIT_SECONDS = 10
 
-# Apps that would let a confused or hijacked model run arbitrary commands.
-BLOCKED_APP_WORDS = ("command prompt", "powershell", "terminal", "registry editor", "regedit", "cmd")
+# Apps that would let a confused or hijacked model run arbitrary commands -
+# including "Windows Tools", a launcher for cmd, PowerShell and regedit.
+BLOCKED_APP_WORDS = ("command prompt", "powershell", "terminal", "registry editor", "regedit", "cmd",
+                     "windows tools")
+
+
+def _is_blocked(name: str) -> bool:
+    return any(word in name.lower() for word in BLOCKED_APP_WORDS)
 
 # Window classes of console/terminal hosts. Keyboard input to these could
 # execute commands - including in the terminal running this agent.
@@ -80,7 +85,11 @@ def _start_apps() -> list:
 
 def _find_app(name: str):
     """Best Start-menu match for `name`: exact, then prefix, then all words
-    contained, then fuzzy. Returns the app dict or None."""
+    contained. Returns the app dict or None.
+
+    No "close enough" fuzzy matching: it once turned "Windows Terminal" into
+    "Windows Tools" and launched that instead. Better to report no match
+    and let the model name the app properly."""
     wanted = name.strip().lower()
     apps = _start_apps()
     names = {a["Name"].lower(): a for a in apps}
@@ -93,8 +102,7 @@ def _find_app(name: str):
     containing = [a for a in apps if words and words <= set(re.findall(r"\w+", a["Name"].lower()))]
     if containing:
         return min(containing, key=lambda a: len(a["Name"]))
-    close = difflib.get_close_matches(wanted, list(names), n=1, cutoff=0.6)
-    return names[close[0]] if close else None
+    return None
 
 
 def _top_windows() -> list:
@@ -137,10 +145,14 @@ def _bring_to_front(window) -> bool:
 
 
 def open_app(name: str):
+    # Check what was ASKED for, not only what it matched: a blocked request
+    # must never resolve to some other, unblocked app.
+    if _is_blocked(name):
+        return ExecutionResult(False, "blocked", error=f"refused: launching {name!r} is not allowed"), None
     app = _find_app(name)
     if app is None:
         return ExecutionResult(False, "tool", error=f"no installed app matches {name!r}"), None
-    if any(word in app["Name"].lower() for word in BLOCKED_APP_WORDS):
+    if _is_blocked(app["Name"]):
         return ExecutionResult(False, "blocked", error=f"refused: launching {app['Name']!r} is not allowed"), None
 
     before = {w.handle for w in _top_windows()}
