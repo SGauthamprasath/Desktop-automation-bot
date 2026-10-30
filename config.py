@@ -36,6 +36,11 @@ MAX_RETRIES_ON_BAD_JSON = 2
 # actor then sees every step. "0" turns it off - useful for comparing.
 USE_PLANNER = os.getenv("USE_PLANNER", "1") == "1"
 
+# Phase 3: when the agent says "done", a separate model call checks the
+# current screen against the task and DONE WHEN, and sends it back to work if
+# it isn't finished. "0" turns it off - for the with/without comparison.
+CHECK_DONE = os.getenv("CHECK_DONE", "1") == "1"
+
 # WinUI 3 apps (e.g. Windows 11 Notepad) only render a menu/dropdown flyout
 # while the app is the foreground window - invoked in the background, the
 # element reports "expanded" but no items ever appear in the UIA tree. When

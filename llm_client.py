@@ -94,6 +94,30 @@ Example, task "Turn on dark mode in the app's settings":
 {"steps": ["Open the Settings page", "Turn on the Dark mode switch"], "done_when": "The Dark mode switch is on"}
 """
 
+DONE_CHECK_PROMPT = """You check whether a desktop automation task is finished, judging from the
+CURRENT SCREEN. Another agent claims it is finished - it is often wrong (it
+claims success after typing a calculation without pressing "=", or without
+doing anything at all), so do not take its word.
+
+Respond with ONLY this JSON object:
+{"evidence": "<the element or text on screen that decides it, copied exactly>", "complete": true or false, "missing": "<what is still not done, or "">"}
+
+Write "evidence" FIRST, copied word for word from the screen below.
+
+Rules:
+- The TASK decides. DONE WHEN is a planner's guess and can be wrong (it once
+  said 1232 for "delete the last digit of 123"): if it disagrees with the
+  task, work out the right result from the task yourself.
+- Check EVERY part of the task against the screen.
+- CURRENT WINDOW is part of the screen: an app, folder or page is open when
+  the window title names it (folder "sub" open = title "sub - File Explorer").
+- Results must match exactly: a display showing 15 when the task needs 42 is
+  not complete; an item without "selected" is not selected; a setting must
+  show the on/off state the task asks for.
+- A task can be complete with no actions, if the screen already shows it.
+- If nothing on screen shows that the task is finished, it is not complete.
+"""
+
 MAX_PLAN_STEPS = 8  # 5 was too few: a 6-step plan got rejected and the retry silently dropped a step
 PLAN_CONTEXT_ELEMENTS = 30  # element names shown to the planner - enough to be concrete
 
@@ -509,7 +533,9 @@ def _render_history(history: list) -> str:
             line = f'{i}. {action_type} "{_clean(value)}"'
         if isinstance(a.get("plan_step"), int):
             line += f" [plan step {a['plan_step']}]"
-        line += " -> OK" if h["result"] else " -> FAILED"
+        if action_type == "done":
+            line = f"{i}. done"
+        line += " -> OK" if h["result"] else " -> REJECTED" if action_type == "done" else " -> FAILED"
         if h.get("note"):
             line += f" ({h['note']})"
         changes = h.get("screen_changes") or {}
@@ -520,6 +546,8 @@ def _render_history(history: list) -> str:
             described.append("appeared: " + ", ".join(f'"{_clean(t)}"' for t in changes["appeared"]))
         if changes.get("gone"):
             described.append("gone: " + ", ".join(f'"{_clean(t)}"' for t in changes["gone"]))
+        if changes.get("changed"):
+            described.append("changed: " + ", ".join(changes["changed"]))
         if changes.get("note"):
             described.append(changes["note"])
         if described:
@@ -620,6 +648,117 @@ def make_plan(task: str, screen_state: dict):
             print(f"  [warn] planner returned an invalid plan (attempt {attempt + 1}): {e}")
             messages += [{"role": "assistant", "content": raw},
                          {"role": "user", "content": f"That plan was invalid: {e}. Try again with the exact JSON shape."}]
+    return None
+
+
+def _evidence_key(text) -> str:
+    # The screen shows line breaks as a literal \n; the model sometimes copies
+    # them as real ones - both become a space.
+    return _name_key(str(text or "").replace("\\n", " ")).strip("'\" ")
+
+
+def _screen_text(compact: dict) -> str:
+    """Everything the done check may quote as evidence, normalized like _evidence_key."""
+    parts = [compact["window_title"] or ""] + compact["texts"]
+    for e in compact["elements"]:
+        parts.append(_render_element(e))
+        parts.append(_preview(e["value"]) if "value" in e else "")
+    return _evidence_key(" | ".join(parts))
+
+
+# State words in DONE WHEN -> the element state that must hold.
+STATE_CLAIMS = [
+    (re.compile(r"\b(?:not|un)selected\b|\bnot\s+selected\b"), "selected", False),
+    (re.compile(r"\bselected\b"), "selected", True),
+    (re.compile(r"\b(?:is|are|turned|switched)\s+off\b|\bdisabled\b|\bunchecked\b"), "toggled", False),
+    (re.compile(r"\b(?:is|are|turned|switched)\s+on\b|\benabled\b|\bchecked\b"), "toggled", True),
+]
+
+
+def _contradicted_state(evidence: str, done_when: str, compact: dict):
+    """
+    A "complete" verdict whose own evidence shows the wrong state, e.g.
+    DONE WHEN "beta.txt is selected" with evidence "beta.txt" - an element
+    the screen lists WITHOUT "selected" (seen in testing). The judge named
+    the right element but didn't read its state; this reads it for it.
+    Returns what is missing, or None.
+    """
+    wanted = done_when.lower()
+    evidence_key = _evidence_key(evidence)
+    quoted = [e for e in compact["elements"] if e["name"].strip() and _evidence_key(e["name"]) in evidence_key]
+    for pattern, field, value in STATE_CLAIMS:
+        if not pattern.search(wanted):
+            continue
+        relevant = [e for e in quoted if field in e or field == "selected" and "selection_item" in e["patterns"]]
+        if relevant and not any(bool(e.get(field)) == value for e in relevant):
+            word = {"selected": ("selected", "not selected"), "toggled": ("on", "off")}[field]
+            return f"{relevant[0]['name']!r} is {word[0] if not value else word[1]} on screen"
+        break  # only the first (most specific) state word applies
+    return None
+
+
+def check_done(task: str, screen_state: dict, history: list, plan=None):
+    """
+    Phase 3: second opinion on a "done" claim. In the Task 3 benchmark the
+    agent claimed success on 40 tasks but only 35 were really complete -
+    Calculator showing "Display is 0" after a "done", or "done" as the very
+    first action with nothing changed. A separate call that sees only the
+    task and the CURRENT screen (not the agent's reasoning) can catch these;
+    a rejection sends the agent back to work with the reason.
+
+    DONE WHEN is shown as a hint, not the rule: the planner once wrote "The
+    display shows 1232" for deleting the last digit of 123, and a judge that
+    trusted it rejected the correct 12. Without DONE WHEN at all, though, the
+    7B judge had no target and guessed (10/14 vs 12/14 on the offline cases).
+
+    The evidence must be copied from the screen - a check against the real
+    screen text keeps the judge from simply agreeing with a claim it can't
+    point to. Returns {"complete": bool, "missing": str, "evidence": str},
+    or None when the model can't give a valid verdict (the claim then stands:
+    the check only ever adds work, it never ends a task by itself).
+    """
+    compact = _compact_elements(screen_state, task=task)
+    title = compact["window_title"]
+    user_message = "\n".join([
+        f"TASK: {task}",
+        f"DONE WHEN (the planner's guess - the task decides): {plan['done_when']}" if plan else "",
+        f"CURRENT WINDOW: {title!r}" if title else "CURRENT WINDOW: (none)",
+        "OPEN WINDOWS: " + (" | ".join(_clean(t) for t in compact["open_windows"]) or "(none)"),
+        "CURRENT SCREEN:",
+        "\n".join(_render_element(e) for e in compact["elements"]) or "(none)",
+        "OTHER TEXT ON SCREEN: " + (" | ".join(f'"{t}"' for t in compact["texts"]) or "(none)"),
+        "ACTIONS THE AGENT TOOK (the screen decides, not this list):",
+        _render_history(history),
+        "",
+        "Is the task complete? Respond with ONE JSON object: evidence, complete, missing.",
+    ])
+    messages = [{"role": "system", "content": DONE_CHECK_PROMPT}, {"role": "user", "content": user_message}]
+    call = _call_local if config.BACKEND == "local" else _call_cloud
+    on_screen = _screen_text(compact)
+    for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
+        raw = ""
+        try:
+            raw = call(messages, 0 if attempt == 0 else 0.4)
+            parsed = json.loads(_strip_fences(raw))
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("complete"), bool):
+                raise ActionSchemaError('"complete" must be true or false')
+            evidence = str(parsed.get("evidence") or "").strip()
+            # Only a "complete" verdict needs proof; "not complete" just sends the agent back to work.
+            if parsed["complete"] and (not evidence or _evidence_key(evidence) not in on_screen):
+                raise ActionSchemaError(
+                    f"the evidence {evidence!r} is not on the screen - copy an element or text from CURRENT SCREEN exactly, "
+                    "or answer complete: false if nothing on screen shows the task is finished")
+            missing = _clean(parsed.get("missing") or "")
+            if parsed["complete"] and plan:
+                contradiction = _contradicted_state(evidence, plan["done_when"], compact)
+                if contradiction:
+                    print(f"  [done check] verdict overruled - its own evidence shows {contradiction}")
+                    return {"complete": False, "evidence": _clean(evidence), "missing": contradiction}
+            return {"complete": parsed["complete"], "evidence": _clean(evidence), "missing": missing}
+        except (json.JSONDecodeError, ActionSchemaError) as e:
+            print(f"  [warn] done check returned an invalid verdict (attempt {attempt + 1}): {e}")
+            messages += [{"role": "assistant", "content": raw},
+                         {"role": "user", "content": f"That verdict was invalid: {e}. Try again with the exact JSON shape."}]
     return None
 
 

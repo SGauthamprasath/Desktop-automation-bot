@@ -22,9 +22,15 @@ import config
 import tools
 from perception import get_screen_state, connect_to_app, detect_popup
 from executor import execute_action, ExecutionResult
-from llm_client import get_action, make_plan
+from llm_client import get_action, make_plan, check_done
 
 MAX_STEPS = 15
+# Phase 3 recovery limits. A failed action goes back to the model with its
+# error instead of ending the task, but 3 failures in a row means it is stuck.
+MAX_CONSECUTIVE_FAILURES = 3
+# After this many rejected "done" claims, the next one stands - the done check
+# is itself a 7B model and can be wrong; the benchmark still verifies.
+MAX_DONE_REJECTIONS = 2
 MAX_CHANGES_LISTED = 6  # per direction - enough to describe a step, small enough for the prompt
 
 
@@ -51,7 +57,36 @@ def _screen_changes(before: dict, after: dict) -> dict:
         changes["appeared"] = appeared
     if gone:
         changes["gone"] = gone
+    changed = _state_changes(before, after)[:MAX_CHANGES_LISTED]
+    if changed:
+        changes["changed"] = changed
     return changes or {"note": "no visible change"}
+
+
+STATE_WORDS = {"toggled": ("on", "off"), "expanded": ("expanded", "collapsed"), "selected": ("selected", "not selected")}
+
+
+def _state_changes(before: dict, after: dict) -> list:
+    """
+    Elements whose state changed while their name stayed the same. Comparing
+    names alone reported "no visible change" after every successful set_value
+    or toggle - the name doesn't change, only the content or the on/off state -
+    which invited the model to redo work that had already landed.
+    """
+    def by_name(state):
+        return {(e["control_type"], e["name"].strip()): e for e in state["elements"] if e["name"].strip()}
+
+    old, new = by_name(before), by_name(after)
+    changed = []
+    for key in old.keys() & new.keys():
+        name = key[1]
+        for field, (yes, no) in STATE_WORDS.items():
+            if field in old[key] and field in new[key] and old[key][field] != new[key][field]:
+                changed.append(f'"{name}" now {yes if new[key][field] else no}')
+        if "value" in old[key] and "value" in new[key] and old[key]["value"] != new[key]["value"]:
+            text = new[key]["value"].replace("\r\n", "\n").replace("\r", "\n")
+            changed.append(f'"{name}" now contains {json.dumps(text[:60], ensure_ascii=False)}')
+    return sorted(changed)
 
 
 def _alive(window) -> bool:
@@ -96,6 +131,8 @@ def run_task(task: str, app_title_regex: str = None):
     previous_state = None
     plan = None
     touched = set()  # handles of windows the agent acted in - the runner's cleanup looks there
+    failures_in_a_row = 0
+    done_rejections = 0
     for step in range(MAX_STEPS):
         if window is not None and not _alive(window):
             print("  [info] the current window has closed")
@@ -128,6 +165,17 @@ def run_task(task: str, app_title_regex: str = None):
         print(f"  -> {action}")
 
         if action["action_type"] == "done":
+            if config.CHECK_DONE and done_rejections < MAX_DONE_REJECTIONS:
+                verdict = check_done(task, state, history, plan)
+                if verdict and not verdict["complete"]:
+                    done_rejections += 1
+                    missing = verdict["missing"] or "the screen does not show the task finished"
+                    print(f"  [done check] rejected ({done_rejections}/{MAX_DONE_REJECTIONS}): {missing}"
+                          f"  | evidence: {verdict['evidence']!r}")
+                    history.append({"action": action, "result": False, "note": f"not finished yet: {missing}"})
+                    continue
+                if verdict:
+                    print(f"  [done check] confirmed | evidence: {verdict['evidence']!r}")
             print("\nTask marked complete by agent.")
             return _outcome(True, step + 1, history, window, plan, touched)
 
@@ -149,13 +197,24 @@ def run_task(task: str, app_title_regex: str = None):
         entry = {"action": action, "result": result.success}
         if result.detail:
             entry["note"] = result.detail  # e.g. which window opened - the model needs to know
+        if not result.success and result.error:
+            entry["note"] = result.error  # why it failed - what the model needs to recover
         history.append(entry)
 
-        if not result.success:
-            # Phase 1 has no recovery yet - just log and stop.
-            # Phase 3 replaces this with detection + retry/rollback.
-            print(f"\nAction failed, stopping (Phase 3 will handle recovery): {result.error}")
+        if result.success:
+            failures_in_a_row = 0
+        elif result.method_used == "blocked":
+            # A safety refusal ends the task: retrying would mean hunting for
+            # another way to do what was just refused.
+            print(f"\nAction refused, stopping: {result.error}")
             return _outcome(False, step + 1, history, window, plan, touched)
+        else:
+            failures_in_a_row += 1
+            if failures_in_a_row >= MAX_CONSECUTIVE_FAILURES:
+                print(f"\nStopping: {failures_in_a_row} failed actions in a row (last: {result.error})")
+                return _outcome(False, step + 1, history, window, plan, touched)
+            print(f"  [recover] action failed ({failures_in_a_row}/{MAX_CONSECUTIVE_FAILURES}) - "
+                  f"the model sees the error and tries again")
 
     print("\nMax steps reached without completion.")
     return _outcome(False, MAX_STEPS, history, window, plan, touched)
