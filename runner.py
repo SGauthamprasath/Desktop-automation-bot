@@ -61,7 +61,10 @@ def run_one(task) -> dict:
     }
     before, touched = {}, []
     try:
-        fixtures.run_steps(task.get("setup"))
+        try:
+            fixtures.run_steps(task.get("setup"))
+        except Exception as e:
+            raise SetupError(f"{type(e).__name__}: {e}") from e
         before = fixtures.snapshot_windows()
         outcome = run_task(task["instruction"], task.get("app_title_regex"))
         touched = outcome.get("touched_windows", [])
@@ -95,6 +98,15 @@ def run_one(task) -> dict:
     return row
 
 
+class SetupError(Exception):
+    """A task's setup failed - the agent never ran."""
+
+
+# Stop after this many setup failures in a row. When Notepad crashed on every
+# start, each task relaunched it 3 times and all 17 Notepad tasks "ran" anyway.
+MAX_SETUP_FAILURES = 2
+
+
 def run_all(tasks, only_ids=None, category=None):
     if only_ids:
         tasks = [t for t in tasks if t["id"] in only_ids]
@@ -105,13 +117,20 @@ def run_all(tasks, only_ids=None, category=None):
         return []
 
     results = []
+    setup_failures = 0
     for task in tasks:
         print(f"\n{'=' * 60}")
         print(f"TASK: {task['id']}  ({task.get('notes', '')})")
         print(f"  instruction: {task['instruction']}")
         print(f"  app: {task.get('app_title_regex') or '(none - agent opens/switches itself)'}")
         print("=" * 60)
-        results.append(run_one(task))
+        row = run_one(task)
+        results.append(row)
+        setup_failures = setup_failures + 1 if row["error"].startswith("SetupError") else 0
+        if setup_failures >= MAX_SETUP_FAILURES:
+            print(f"\n[STOP] setup failed for {setup_failures} tasks in a row ({row['error']}) - an app "
+                  f"the tasks need is probably not starting. Fix it and rerun; the remaining tasks were skipped.")
+            break
     return results
 
 
