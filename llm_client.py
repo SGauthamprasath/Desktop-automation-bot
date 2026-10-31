@@ -80,12 +80,18 @@ Rules:
 - 1 to 8 steps. Each step is a sub-goal like "Open the View menu" or
   "Calculate 15 + 27" - not single keystrokes or digits.
 - Cover EVERY part of the task, and make "done_when" check every part.
+- "done_when" names the exact end result, worked out from what is on screen
+  NOW: a display showing 123, task "delete the last digit" -> "The display
+  shows 12"; task "add 5 to it" -> "The display shows 128".
 - Do not add steps the task does not ask for. If the task is to open a menu,
   the plan ends once the menu is open - do not click anything inside it.
 - If the needed app is not the current window, the first step opens or
   switches to it.
 - Entering a number or calculation is ONE step with every character in the
   task's order, e.g. "Type 9*4=" - never one step per button or digit.
+- An operation on ONE number (reciprocal, square, square root, sign change,
+  percent) is: enter the number, then press that operation's own button,
+  e.g. "Type 4" then "Press Reciprocal" - not a division.
 - Writing, replacing or deleting a text field's content is ONE step that
   sets everything in it (e.g. "Set the document text to 'a\\nb'", "Set the
   document text to empty") - no select-all, delete or Enter steps.
@@ -116,6 +122,8 @@ Rules:
   show the on/off state the task asks for.
 - A task can be complete with no actions, if the screen already shows it.
 - If nothing on screen shows that the task is finished, it is not complete.
+- READ BACK lines were read from the app right after acting and count as
+  screen evidence (a menu closes once its item is clicked, hiding the setting).
 """
 
 MAX_PLAN_STEPS = 8  # 5 was too few: a 6-step plan got rejected and the retry silently dropped a step
@@ -636,6 +644,12 @@ def make_plan(task: str, screen_state: dict):
         f"CURRENT WINDOW: {title!r}" if title else "CURRENT WINDOW: (none)",
         "OPEN WINDOWS: " + (" | ".join(_clean(t) for t in compact["open_windows"]) or "(none)"),
         "SOME ELEMENTS ON SCREEN: " + ("; ".join(names) or "(none)"),
+        # Without the screen's text the planner guessed what was there: for
+        # "delete the last digit" with the display at 123 it wrote
+        # "done when: The display shows 1232".
+        "TEXT ON SCREEN: " + (" | ".join(f'"{t}"' for t in compact["texts"]) or "(none)"),
+        *[f'TEXT FIELD "{_clean(e["name"])}" contains: {_preview(e["value"])}'
+          for e in compact["elements"] if "value" in e and e["control_type"] in ("Document", "Edit")][:3],
     ])
     messages = [{"role": "system", "content": PLANNER_PROMPT}, {"role": "user", "content": user_message}]
     call = _call_local if config.BACKEND == "local" else _call_cloud
@@ -697,6 +711,21 @@ def _contradicted_state(evidence: str, done_when: str, compact: dict):
     return None
 
 
+def _read_backs(history: list) -> list:
+    """
+    The executor's read-back notes ("'Status bar' is now off", "current
+    window is now ...") - the latest one per item. Toggling a menu item
+    closes the menu, so the done check could not see the new state and
+    rejected a correct "done"; the agent then toggled the setting back.
+    """
+    latest = {}
+    for h in history:
+        note = str(h.get("note") or "")
+        if h["result"] and " is now " in note:
+            latest[note.split(" is now ")[0]] = _clean(note)
+    return list(latest.values())
+
+
 def check_done(task: str, screen_state: dict, history: list, plan=None):
     """
     Phase 3: second opinion on a "done" claim. In the Task 3 benchmark the
@@ -719,6 +748,7 @@ def check_done(task: str, screen_state: dict, history: list, plan=None):
     """
     compact = _compact_elements(screen_state, task=task)
     title = compact["window_title"]
+    read_backs = _read_backs(history)
     user_message = "\n".join([
         f"TASK: {task}",
         f"DONE WHEN (the planner's guess - the task decides): {plan['done_when']}" if plan else "",
@@ -727,39 +757,57 @@ def check_done(task: str, screen_state: dict, history: list, plan=None):
         "CURRENT SCREEN:",
         "\n".join(_render_element(e) for e in compact["elements"]) or "(none)",
         "OTHER TEXT ON SCREEN: " + (" | ".join(f'"{t}"' for t in compact["texts"]) or "(none)"),
+        # Left out when empty: a "(none)" line here flipped a correct
+        # "Display is 36" verdict to "not complete" in testing.
+        *(["READ BACK FROM THE APP AFTER ACTING: " + " | ".join(f'"{r}"' for r in read_backs)] if read_backs else []),
         "ACTIONS THE AGENT TOOK (the screen decides, not this list):",
         _render_history(history),
         "",
         "Is the task complete? Respond with ONE JSON object: evidence, complete, missing.",
     ])
-    messages = [{"role": "system", "content": DONE_CHECK_PROMPT}, {"role": "user", "content": user_message}]
     call = _call_local if config.BACKEND == "local" else _call_cloud
-    on_screen = _screen_text(compact)
-    for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
-        raw = ""
-        try:
-            raw = call(messages, 0 if attempt == 0 else 0.4)
-            parsed = json.loads(_strip_fences(raw))
-            if not isinstance(parsed, dict) or not isinstance(parsed.get("complete"), bool):
-                raise ActionSchemaError('"complete" must be true or false')
-            evidence = str(parsed.get("evidence") or "").strip()
-            # Only a "complete" verdict needs proof; "not complete" just sends the agent back to work.
-            if parsed["complete"] and (not evidence or _evidence_key(evidence) not in on_screen):
-                raise ActionSchemaError(
-                    f"the evidence {evidence!r} is not on the screen - copy an element or text from CURRENT SCREEN exactly, "
-                    "or answer complete: false if nothing on screen shows the task is finished")
-            missing = _clean(parsed.get("missing") or "")
-            if parsed["complete"] and plan:
-                contradiction = _contradicted_state(evidence, plan["done_when"], compact)
-                if contradiction:
-                    print(f"  [done check] verdict overruled - its own evidence shows {contradiction}")
-                    return {"complete": False, "evidence": _clean(evidence), "missing": contradiction}
-            return {"complete": parsed["complete"], "evidence": _clean(evidence), "missing": missing}
-        except (json.JSONDecodeError, ActionSchemaError) as e:
-            print(f"  [warn] done check returned an invalid verdict (attempt {attempt + 1}): {e}")
-            messages += [{"role": "assistant", "content": raw},
-                         {"role": "user", "content": f"That verdict was invalid: {e}. Try again with the exact JSON shape."}]
-    return None
+    on_screen = _screen_text(compact) + " | " + _evidence_key(" | ".join(read_backs))
+
+    def judge(first_temperature):
+        messages = [{"role": "system", "content": DONE_CHECK_PROMPT}, {"role": "user", "content": user_message}]
+        for attempt in range(config.MAX_RETRIES_ON_BAD_JSON + 1):
+            raw = ""
+            try:
+                raw = call(messages, first_temperature if attempt == 0 else 0.7)
+                parsed = json.loads(_strip_fences(raw))
+                if not isinstance(parsed, dict) or not isinstance(parsed.get("complete"), bool):
+                    raise ActionSchemaError('"complete" must be true or false')
+                evidence = str(parsed.get("evidence") or "").strip()
+                # Only a "complete" verdict needs proof; "not complete" just sends the agent back to work.
+                if parsed["complete"] and (not evidence or _evidence_key(evidence) not in on_screen):
+                    raise ActionSchemaError(
+                        f"the evidence {evidence!r} is not on the screen - copy an element or text from CURRENT SCREEN exactly, "
+                        "or answer complete: false if nothing on screen shows the task is finished")
+                missing = _clean(parsed.get("missing") or "")
+                if parsed["complete"] and plan:
+                    contradiction = _contradicted_state(evidence, plan["done_when"], compact)
+                    if contradiction:
+                        print(f"  [done check] verdict overruled - its own evidence shows {contradiction}")
+                        return {"complete": False, "evidence": _clean(evidence), "missing": contradiction, "overruled": True}
+                return {"complete": parsed["complete"], "evidence": _clean(evidence), "missing": missing}
+            except (json.JSONDecodeError, ActionSchemaError) as e:
+                print(f"  [warn] done check returned an invalid verdict (attempt {attempt + 1}): {e}")
+                messages += [{"role": "assistant", "content": raw},
+                             {"role": "user", "content": f"That verdict was invalid: {e}. Try again with the exact JSON shape."}]
+        return None
+
+    verdict = judge(0)
+    if verdict and not verdict["complete"] and not verdict.get("overruled"):
+        # A rejection needs a second vote. The two mistakes don't cost the
+        # same: a wrong rejection made the agent undo correct work (Status bar
+        # toggled back on), a wrong acceptance is no worse than having no
+        # check. And small prompt changes flipped single verdicts back and
+        # forth on the offline cases - one sample was too noisy to act on.
+        second = judge(0.5)
+        if second and second["complete"]:
+            print(f"  [done check] second vote disagrees with the rejection - claim stands")
+            return second
+    return verdict
 
 
 def _strip_fences(text: str) -> str:
